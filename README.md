@@ -29,8 +29,8 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 
 # 4. Run
-./build/VoxelBuilder_artefacts/Release/VoxelBuilder
-# (macOS: open build/VoxelBuilder_artefacts/Release/VoxelBuilder.app)
+./build/SIME_artefacts/Release/SIME
+# (macOS: open build/SIMEr_artefacts/Release/SIME.app)
 ```
 
 ---
