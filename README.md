@@ -19,7 +19,7 @@ A 3-D voxel construction tool built with JUCE + OpenGL 3.3.
 
 ```bash
 # 1. Clone JUCE into the project root
-cd VoxelBuilder
+cd SIME
 git clone https://github.com/juce-framework/JUCE.git JUCE
 
 # 2. Configure
