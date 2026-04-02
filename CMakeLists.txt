@@ -17,9 +17,11 @@ juce_add_gui_app(SIME
 target_sources(SIME PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
+    Source/SidebarComponent.cpp
     Source/Camera.cpp
     Source/Raycaster.cpp
     Source/Renderer.cpp
+    Source/ViewPortComponent.cpp
 )
 
 target_compile_definitions(SIME PRIVATE
