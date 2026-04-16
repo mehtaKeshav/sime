@@ -66,20 +66,20 @@ ViewPortComponent::ViewPortComponent()
     audioEngine.generateTestTone(1, 660.0f, 2.0);
     audioEngine.generateTestTone(2, 880.0f, 2.0);
 
-    // Violin presets (synthesised test tones until real samples are added)
-    audioEngine.generateTestTone(100, 220.0f, 2.0);   // A3
-    audioEngine.generateTestTone(101, 294.0f, 2.0);   // D4
-    audioEngine.generateTestTone(102, 196.0f, 2.0);   // G3
+    // Violin presets — vibrato + harmonics, sustained
+    audioEngine.generateViolinTone(100, 220.0f, 2.0);   // A3
+    audioEngine.generateViolinTone(101, 294.0f, 2.0);   // D4
+    audioEngine.generateViolinTone(102, 196.0f, 2.0);   // G3
 
-    // Piano presets
-    audioEngine.generateTestTone(200, 262.0f, 2.0);   // C4
-    audioEngine.generateTestTone(201, 440.0f, 2.0);   // A4
-    audioEngine.generateTestTone(202, 523.0f, 2.0);   // C5
+    // Piano presets — sharp attack, decaying harmonics
+    audioEngine.generatePianoTone(200, 262.0f, 2.0);    // C4
+    audioEngine.generatePianoTone(201, 440.0f, 2.0);    // A4
+    audioEngine.generatePianoTone(202, 523.0f, 2.0);    // C5
 
-    // Drum presets
-    audioEngine.generateTestTone(300,  80.0f, 0.4);   // Kick
-    audioEngine.generateTestTone(301, 200.0f, 0.3);   // Snare
-    audioEngine.generateTestTone(302, 800.0f, 0.15);  // Hi-Hat
+    // Drum presets — each has distinct character
+    audioEngine.generateDrumHit(300, 0, 0.5);    // Kick
+    audioEngine.generateDrumHit(301, 1, 0.4);    // Snare
+    audioEngine.generateDrumHit(302, 2, 0.2);    // Hi-Hat
 
     audioEngine.start();
 }

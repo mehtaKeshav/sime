@@ -72,17 +72,24 @@ BlockEditPopup::BlockEditPopup()
     browseButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     browseButton.onClick = [this]
     {
-        fileChooser_ = std::make_unique<juce::FileChooser>(
-            "Select WAV file", juce::File(), "*.wav");
+        auto startDir = customFilePath_.isNotEmpty()
+            ? juce::File(customFilePath_).getParentDirectory()
+            : juce::File::getSpecialLocation(juce::File::userDesktopDirectory);
 
-        fileChooser_->launchAsync(juce::FileBrowserComponent::openMode
-                                | juce::FileBrowserComponent::canSelectFiles,
+        fileChooser_ = std::make_unique<juce::FileChooser>(
+            "Select WAV file", startDir, "*.wav");
+
+        auto* chooserPtr = fileChooser_.get();
+
+        chooserPtr->launchAsync(
+            juce::FileBrowserComponent::openMode
+          | juce::FileBrowserComponent::canSelectFiles,
             [this](const juce::FileChooser& fc)
             {
-                auto result = fc.getResult();
-                if (result.existsAsFile())
+                auto results = fc.getResults();
+                if (results.size() > 0 && results[0].existsAsFile())
                 {
-                    customFilePath_ = result.getFullPathName();
+                    customFilePath_ = results[0].getFullPathName();
                     fileField.setText(customFilePath_, false);
                 }
             });
@@ -207,8 +214,9 @@ void BlockEditPopup::showAt(int blockSerial, BlockType type,
     px = juce::jlimit(screen.getX(), screen.getRight()  - kWidth,  px);
     py = juce::jlimit(screen.getY(), screen.getBottom() - kHeight, py);
 
-    setBounds(px, py, kWidth, kHeight);
     setVisible(true);
+    setBounds(px, py, kWidth, kHeight);
+    resized();
     toFront(true);
     startField.grabKeyboardFocus();
 }
