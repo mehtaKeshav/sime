@@ -48,10 +48,15 @@ public:
 
     // ── Render calls (GL thread only) ────────────────────────────────────────
 
-    /// Draw all solid voxels with simple diffuse shading.
+    /// Draw all solid voxels with simple diffuse shading (single color batch).
     /// vp       : combined view × projection matrix
     /// lightDir : normalised world-space direction toward the light
     void render(const Mat4& vp, const Vec3f& lightDir);
+
+    /// Draw a single solid cube at `pos` with the given base color.
+    /// Used for per-block colored rendering.
+    void renderSolidBlock(const Mat4& vp, const Vec3f& lightDir,
+                          const Vec3i& pos, const Vec3f& color);
 
     /// Draw the reference grid at y = 0.
     void renderGrid(const Mat4& vp);
@@ -83,9 +88,10 @@ private:
     GLuint progUnlit     = 0;   // used for grid and highlight
 
     // Uniform locations – voxel shader
-    GLint uVP_vox  = -1;
-    GLint uLight   = -1;
-    GLint uColor_v = -1;
+    GLint uVP_vox         = -1;
+    GLint uLight          = -1;
+    GLint uColor_v        = -1;
+    GLint uModelOffset_vox = -1;
 
     // Uniform locations – unlit shader
     GLint uVP_unlit    = -1;

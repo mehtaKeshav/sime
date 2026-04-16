@@ -43,6 +43,12 @@ void AudioEngine::clearSamples()
 }
 
 // ---------------------------------------------------------------------------
+bool AudioEngine::hasSample(int soundId) const
+{
+    return sampleLibrary_.count(soundId) > 0;
+}
+
+// ---------------------------------------------------------------------------
 void AudioEngine::generateTestTone(int soundId, float frequencyHz, double durationSec)
 {
     constexpr double kGenRate = 44100.0;
@@ -68,6 +74,145 @@ void AudioEngine::generateTestTone(int soundId, float frequencyHz, double durati
             envelope = static_cast<float>(numSamples - i) / static_cast<float>(fadeSamples);
 
         data[i] = sample * envelope * 0.4f;
+    }
+
+    sampleLibrary_[soundId] = std::move(buf);
+}
+
+// ---------------------------------------------------------------------------
+void AudioEngine::generateViolinTone(int soundId, float frequencyHz, double durationSec)
+{
+    constexpr double kGenRate = 44100.0;
+    const int numSamples = static_cast<int>(kGenRate * durationSec);
+
+    juce::AudioBuffer<float> buf(1, numSamples);
+    float* data = buf.getWritePointer(0);
+
+    const float twoPi = juce::MathConstants<float>::twoPi;
+    const float baseInc = twoPi * frequencyHz / static_cast<float>(kGenRate);
+
+    // Vibrato parameters
+    const float vibratoRate = 5.5f;
+    const float vibratoDepth = 6.0f;
+    const float vibratoInc = twoPi * vibratoRate / static_cast<float>(kGenRate);
+
+    const int attackSamples  = std::min(static_cast<int>(kGenRate * 0.08), numSamples / 4);
+    const int releaseSamples = std::min(static_cast<int>(kGenRate * 0.15), numSamples / 4);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        float t = static_cast<float>(i);
+
+        float vibrato = vibratoDepth * std::sin(vibratoInc * t);
+        float phase = (baseInc + twoPi * vibrato / static_cast<float>(kGenRate)) * t;
+
+        // Fundamental + harmonics to give a richer, string-like timbre
+        float sample = std::sin(phase) * 0.55f
+                     + std::sin(phase * 2.0f) * 0.25f
+                     + std::sin(phase * 3.0f) * 0.12f
+                     + std::sin(phase * 4.0f) * 0.06f;
+
+        // Envelope: gentle attack, sustain, gentle release
+        float env = 1.0f;
+        if (i < attackSamples)
+            env = static_cast<float>(i) / static_cast<float>(attackSamples);
+        else if (i > numSamples - releaseSamples)
+            env = static_cast<float>(numSamples - i) / static_cast<float>(releaseSamples);
+
+        data[i] = sample * env * 0.35f;
+    }
+
+    sampleLibrary_[soundId] = std::move(buf);
+}
+
+// ---------------------------------------------------------------------------
+void AudioEngine::generatePianoTone(int soundId, float frequencyHz, double durationSec)
+{
+    constexpr double kGenRate = 44100.0;
+    const int numSamples = static_cast<int>(kGenRate * durationSec);
+
+    juce::AudioBuffer<float> buf(1, numSamples);
+    float* data = buf.getWritePointer(0);
+
+    const float twoPi = juce::MathConstants<float>::twoPi;
+    const float baseInc = twoPi * frequencyHz / static_cast<float>(kGenRate);
+
+    // Harmonic amplitudes (piano has strong initial harmonics that decay)
+    const float harmonics[] = { 1.0f, 0.5f, 0.35f, 0.15f, 0.08f, 0.04f };
+    const int numHarmonics = 6;
+
+    // Exponential decay time constant — higher harmonics decay faster
+    const float decayBase = static_cast<float>(numSamples) * 0.4f;
+
+    const int attackSamples = std::min(static_cast<int>(kGenRate * 0.005), numSamples / 4);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        float t = static_cast<float>(i);
+        float sample = 0.0f;
+
+        for (int h = 0; h < numHarmonics; ++h)
+        {
+            float harmFreq = baseInc * static_cast<float>(h + 1);
+            float harmDecay = std::exp(-t / (decayBase / static_cast<float>(h + 1)));
+            sample += std::sin(harmFreq * t) * harmonics[h] * harmDecay;
+        }
+
+        // Sharp attack
+        float env = 1.0f;
+        if (i < attackSamples)
+            env = static_cast<float>(i) / static_cast<float>(attackSamples);
+
+        data[i] = sample * env * 0.35f;
+    }
+
+    sampleLibrary_[soundId] = std::move(buf);
+}
+
+// ---------------------------------------------------------------------------
+void AudioEngine::generateDrumHit(int soundId, int drumType, double durationSec)
+{
+    constexpr double kGenRate = 44100.0;
+    const int numSamples = static_cast<int>(kGenRate * durationSec);
+
+    juce::AudioBuffer<float> buf(1, numSamples);
+    float* data = buf.getWritePointer(0);
+
+    const float twoPi = juce::MathConstants<float>::twoPi;
+    juce::Random rng;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        float t = static_cast<float>(i);
+        float tSec = t / static_cast<float>(kGenRate);
+        float sample = 0.0f;
+
+        if (drumType == 0)
+        {
+            // Kick: pitch-dropping sine (150Hz → 50Hz) + fast decay
+            float freq = 50.0f + 100.0f * std::exp(-tSec * 30.0f);
+            float phase = twoPi * freq * t / static_cast<float>(kGenRate);
+            float body = std::sin(phase) * std::exp(-tSec * 8.0f);
+            float click = (rng.nextFloat() * 2.0f - 1.0f) * std::exp(-tSec * 80.0f) * 0.3f;
+            sample = body + click;
+        }
+        else if (drumType == 1)
+        {
+            // Snare: low tone + noise burst
+            float tone = std::sin(twoPi * 180.0f * t / static_cast<float>(kGenRate))
+                       * std::exp(-tSec * 15.0f) * 0.5f;
+            float noise = (rng.nextFloat() * 2.0f - 1.0f) * std::exp(-tSec * 12.0f) * 0.7f;
+            sample = tone + noise;
+        }
+        else
+        {
+            // Hi-hat: high-frequency filtered noise, very short
+            float noise = (rng.nextFloat() * 2.0f - 1.0f);
+            float highPass = noise * std::exp(-tSec * 40.0f);
+            sample = highPass * 0.6f;
+        }
+
+        data[i] = sample * 0.5f;
     }
 
     sampleLibrary_[soundId] = std::move(buf);

@@ -80,8 +80,21 @@ public:
     /// Safe to call from message thread before start().
     void generateTestTone(int soundId, float frequencyHz, double durationSec);
 
+    /// Synth a violin-like tone: vibrato + harmonics with sustained envelope.
+    void generateViolinTone(int soundId, float frequencyHz, double durationSec);
+
+    /// Synth a piano-like tone: sharp attack, exponential decay, rich harmonics.
+    void generatePianoTone(int soundId, float frequencyHz, double durationSec);
+
+    /// Synth a drum hit: kick (low thump), snare (noise burst), or hi-hat (click).
+    /// type: 0 = kick, 1 = snare, 2 = hi-hat
+    void generateDrumHit(int soundId, int drumType, double durationSec);
+
     /// Remove all loaded samples (call with audio stopped).
     void clearSamples();
+
+    /// Returns true if sampleLibrary_ already contains this soundId.
+    bool hasSample(int soundId) const;
 
     // -----------------------------------------------------------------------
     // Event ingestion

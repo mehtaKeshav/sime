@@ -20,12 +20,22 @@ BlockEditPopup::BlockEditPopup()
         l.setColour(juce::Label::textColourId, juce::Colour(0xffaaaacc));
         l.setJustificationType(juce::Justification::centredRight);
     };
+    styleLabel(typeLabel,     "Type");
     styleLabel(startLabel,    "Start (s)");
     styleLabel(durationLabel, "Duration (s)");
-    styleLabel(soundLabel,    "Sound ID");
+    styleLabel(soundLabel,    "Sound");
+    styleLabel(fileLabel,     "File");
+
+    addAndMakeVisible(typeLabel);
     addAndMakeVisible(startLabel);
     addAndMakeVisible(durationLabel);
     addAndMakeVisible(soundLabel);
+    addAndMakeVisible(fileLabel);
+
+    // ── Type value (read-only) ────────────────────────────────────────────────
+    typeValueLabel.setFont(juce::Font(12.f, juce::Font::bold));
+    typeValueLabel.setColour(juce::Label::textColourId, juce::Colour(0xffeeeeff));
+    addAndMakeVisible(typeValueLabel);
 
     // ── Text editors ──────────────────────────────────────────────────────────
     auto styleField = [](juce::TextEditor& f, const juce::String& allowed)
@@ -40,10 +50,51 @@ BlockEditPopup::BlockEditPopup()
     };
     styleField(startField,    "0123456789.");
     styleField(durationField, "0123456789.");
-    styleField(soundField,    "-0123456789");
     addAndMakeVisible(startField);
     addAndMakeVisible(durationField);
-    addAndMakeVisible(soundField);
+
+    // ── Sound ComboBox (for instrument blocks) ────────────────────────────────
+    soundCombo.setColour(juce::ComboBox::backgroundColourId,     juce::Colour(0xff1e2030));
+    soundCombo.setColour(juce::ComboBox::textColourId,           juce::Colour(0xffeeeeff));
+    soundCombo.setColour(juce::ComboBox::outlineColourId,        juce::Colour(0xff3344aa));
+    soundCombo.setColour(juce::ComboBox::focusedOutlineColourId, juce::Colour(0xff6677ff));
+    addAndMakeVisible(soundCombo);
+
+    // ── File path field + Browse (for custom blocks) ──────────────────────────
+    fileField.setFont(juce::Font(11.f));
+    fileField.setColour(juce::TextEditor::backgroundColourId,     juce::Colour(0xff1e2030));
+    fileField.setColour(juce::TextEditor::textColourId,           juce::Colour(0xffaabbcc));
+    fileField.setColour(juce::TextEditor::outlineColourId,        juce::Colour(0xff3344aa));
+    fileField.setReadOnly(true);
+    addAndMakeVisible(fileField);
+
+    browseButton.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff2a3355));
+    browseButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    browseButton.onClick = [this]
+    {
+        auto startDir = customFilePath_.isNotEmpty()
+            ? juce::File(customFilePath_).getParentDirectory()
+            : juce::File::getSpecialLocation(juce::File::userDesktopDirectory);
+
+        fileChooser_ = std::make_unique<juce::FileChooser>(
+            "Select WAV file", startDir, "*.wav");
+
+        auto* chooserPtr = fileChooser_.get();
+
+        chooserPtr->launchAsync(
+            juce::FileBrowserComponent::openMode
+          | juce::FileBrowserComponent::canSelectFiles,
+            [this](const juce::FileChooser& fc)
+            {
+                auto results = fc.getResults();
+                if (results.size() > 0 && results[0].existsAsFile())
+                {
+                    customFilePath_ = results[0].getFullPathName();
+                    fileField.setText(customFilePath_, false);
+                }
+            });
+    };
+    addAndMakeVisible(browseButton);
 
     // ── Buttons ───────────────────────────────────────────────────────────────
     applyButton .setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff3355cc));
@@ -52,18 +103,14 @@ BlockEditPopup::BlockEditPopup()
     cancelButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
 
     applyButton .onClick = [this] { commit(); };
-    cancelButton.onClick = [this] { hide();   if (onCancel) onCancel(); };
+    cancelButton.onClick = [this] { hide(); if (onCancel) onCancel(); };
 
     startField   .onReturnKey = [this] { commit(); };
     durationField.onReturnKey = [this] { commit(); };
-    soundField   .onReturnKey = [this] { commit(); };
 
     addAndMakeVisible(applyButton);
     addAndMakeVisible(cancelButton);
 
-    // ── Register as a desktop component ──────────────────────────────────────
-    // componentIsOpaque = false so we can draw a rounded rect with transparency.
-    // windowIsTemporary = true so it doesn't appear in the taskbar.
     addToDesktop(juce::ComponentPeer::windowIsTemporary
                | juce::ComponentPeer::windowHasDropShadow);
 
@@ -72,22 +119,92 @@ BlockEditPopup::BlockEditPopup()
 
 BlockEditPopup::~BlockEditPopup()
 {
-    // removeFromDesktop is called automatically by ~Component, but be explicit
     removeFromDesktop();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-void BlockEditPopup::showAt(int blockSerial, double startTime, double duration,
-                             int soundId, juce::Point<int> screenPos)
+void BlockEditPopup::populateSoundCombo(BlockType type, int currentSoundId)
+{
+    soundCombo.clear(juce::dontSendNotification);
+
+    struct SoundChoice { int id; const char* name; };
+
+    const SoundChoice* choices = nullptr;
+    int count = 0;
+
+    static const SoundChoice kViolin[] = {
+        { 100, "Violin A  (220 Hz)" },
+        { 101, "Violin D  (294 Hz)" },
+        { 102, "Violin G  (196 Hz)" },
+    };
+    static const SoundChoice kPiano[] = {
+        { 200, "Piano C4  (262 Hz)" },
+        { 201, "Piano A4  (440 Hz)" },
+        { 202, "Piano C5  (523 Hz)" },
+    };
+    static const SoundChoice kDrum[] = {
+        { 300, "Kick      (80 Hz)"  },
+        { 301, "Snare     (200 Hz)" },
+        { 302, "Hi-Hat    (800 Hz)" },
+    };
+
+    switch (type)
+    {
+        case BlockType::Violin: choices = kViolin; count = 3; break;
+        case BlockType::Piano:  choices = kPiano;  count = 3; break;
+        case BlockType::Drum:   choices = kDrum;   count = 3; break;
+        default: break;
+    }
+
+    for (int i = 0; i < count; ++i)
+        soundCombo.addItem(choices[i].name, choices[i].id);
+
+    if (currentSoundId > 0)
+        soundCombo.setSelectedId(currentSoundId, juce::dontSendNotification);
+    else if (count > 0)
+        soundCombo.setSelectedId(choices[0].id, juce::dontSendNotification);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+void BlockEditPopup::showAt(int blockSerial, BlockType type,
+                             double startTime, double duration,
+                             int soundId, const juce::String& customFile,
+                             juce::Point<int> screenPos)
 {
     editingSerial = blockSerial;
-    titleLabel.setText("Edit Block " + juce::String(blockSerial), juce::dontSendNotification);
+    editingType   = type;
+
+    titleLabel.setText("Edit " + juce::String(blockTypeName(type))
+                       + " Block " + juce::String(blockSerial),
+                       juce::dontSendNotification);
+
+    typeValueLabel.setText(blockTypeName(type), juce::dontSendNotification);
+
     startField   .setText(juce::String(startTime, 3), false);
     durationField.setText(juce::String(duration,  3), false);
-    soundField   .setText(juce::String(soundId),      false);
 
-    // Position so the popup doesn't fall off screen edges
+    // Show/hide instrument vs. custom selectors
+    bool isCustom = (type == BlockType::Custom);
+
+    soundLabel.setVisible(!isCustom);
+    soundCombo.setVisible(!isCustom);
+    fileLabel .setVisible(isCustom);
+    fileField .setVisible(isCustom);
+    browseButton.setVisible(isCustom);
+
+    if (isCustom)
+    {
+        customFilePath_ = customFile;
+        fileField.setText(customFile, false);
+    }
+    else
+    {
+        populateSoundCombo(type, soundId);
+    }
+
+    // Position on screen
     auto display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
     juce::Rectangle<int> screen = display ? display->userArea
                                           : juce::Rectangle<int>(0, 0, 1920, 1080);
@@ -97,9 +214,9 @@ void BlockEditPopup::showAt(int blockSerial, double startTime, double duration,
     px = juce::jlimit(screen.getX(), screen.getRight()  - kWidth,  px);
     py = juce::jlimit(screen.getY(), screen.getBottom() - kHeight, py);
 
-    // For a desktop component, setBounds uses screen coordinates
-    setBounds(px, py, kWidth, kHeight);
     setVisible(true);
+    setBounds(px, py, kWidth, kHeight);
+    resized();
     toFront(true);
     startField.grabKeyboardFocus();
 }
@@ -118,12 +235,23 @@ void BlockEditPopup::commit()
 {
     if (editingSerial < 0) return;
 
-    const double newStart    = startField   .getText().getDoubleValue();
+    const double newStart    = startField.getText().getDoubleValue();
     const double newDuration = std::max(0.01, durationField.getText().getDoubleValue());
-    const int    newSoundId  = soundField   .getText().getIntValue();
+
+    int newSoundId = -1;
+    juce::String newCustomFile;
+
+    if (editingType == BlockType::Custom)
+    {
+        newCustomFile = customFilePath_;
+    }
+    else
+    {
+        newSoundId = soundCombo.getSelectedId();
+    }
 
     if (onCommit)
-        onCommit(editingSerial, newStart, newDuration, newSoundId);
+        onCommit(editingSerial, newStart, newDuration, newSoundId, newCustomFile);
 
     hide();
 }
@@ -150,16 +278,33 @@ void BlockEditPopup::resized()
     titleLabel.setBounds(kPad, y, kWidth - kPad * 2, 18);
     y += 22;
 
-    auto row = [&](juce::Label& lbl, juce::TextEditor& fld)
+    const int fieldW = kWidth - kPad * 2 - kLabelW - 6;
+
+    auto row = [&](juce::Label& lbl, juce::Component& fld)
     {
-        lbl.setBounds(kPad,                   y, kLabelW,                        kRowH - 4);
-        fld.setBounds(kPad + kLabelW + 6,     y, kWidth - kPad*2 - kLabelW - 6, kRowH - 4);
+        lbl.setBounds(kPad,                y, kLabelW, kRowH - 4);
+        fld.setBounds(kPad + kLabelW + 6,  y, fieldW,  kRowH - 4);
         y += kRowH;
     };
 
+    row(typeLabel,     typeValueLabel);
     row(startLabel,    startField);
     row(durationLabel, durationField);
-    row(soundLabel,    soundField);
+
+    // Sound row (instrument) or File row (custom)
+    if (soundCombo.isVisible())
+    {
+        row(soundLabel, soundCombo);
+    }
+
+    if (fileField.isVisible())
+    {
+        fileLabel.setBounds(kPad, y, kLabelW, kRowH - 4);
+        const int browseW = 70;
+        fileField.setBounds(kPad + kLabelW + 6, y, fieldW - browseW - 4, kRowH - 4);
+        browseButton.setBounds(kPad + kLabelW + 6 + fieldW - browseW, y, browseW, kRowH - 4);
+        y += kRowH;
+    }
 
     y += 6;
     const int btnW = (kWidth - kPad * 2 - 6) / 2;
