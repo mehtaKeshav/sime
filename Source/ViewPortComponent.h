@@ -16,6 +16,7 @@
 #include "sidebarComponent.h"
 #include "BlockEditPopup.h"
 
+#include "BlockType.h"
 #include <atomic>
 #include <vector>
 
@@ -50,15 +51,19 @@ public:
 
     void setSidebarComponent(SidebarComponent* s) { sidebar = s; }
 
+    /// Set the block type used for future placements (called from toolbar).
+    void setActiveBlockType(BlockType t) { activeBlockType_.store(static_cast<int>(t)); }
+
     // ── Edit mode API (called by MainComponent) ───────────────────────────────
- 
+
     /// Fired when user clicks a block in edit mode.
-    /// Args: serial, startTimeSec, durationSec, soundId, posInViewLocalCoords
-    std::function<void(int, double, double, int, juce::Point<int>)> onRequestBlockEdit;
+    /// Args: serial, blockType, start, dur, soundId, customFilePath, viewLocalPos
+    std::function<void(int, BlockType, double, double, int,
+                       const juce::String&, juce::Point<int>)> onRequestBlockEdit;
 
-
-    /// Apply edited values back to the block (called from MainComponent via popup callback)
-    void applyBlockEdit(int serial, double startTime, double duration, int soundId)
+    /// Apply edited values back to the block.
+    void applyBlockEdit(int serial, double startTime, double duration,
+                        int soundId, const juce::String& customFile)
     {
         for (auto& b : blockList)
         {
@@ -66,7 +71,25 @@ public:
             {
                 b.startTimeSec = startTime;
                 b.durationSec  = duration;
-                b.soundId      = soundId;
+
+                if (b.blockType == BlockType::Custom && customFile.isNotEmpty())
+                {
+                    std::string path = customFile.toStdString();
+                    if (path != b.customFilePath)
+                    {
+                        int newId = nextCustomSoundId_++;
+                        if (audioEngine.loadSample(newId, juce::File(customFile)))
+                        {
+                            b.soundId = newId;
+                            b.customFilePath = path;
+                        }
+                    }
+                }
+                else
+                {
+                    b.soundId = soundId;
+                }
+
                 b.resetPlaybackState();
                 break;
             }
@@ -227,6 +250,12 @@ private:
     bool              isSidebarCollapsed = false;
     SidebarComponent* sidebar = nullptr;
 
+
+    // =========================================================================
+    // Block type selection
+    // =========================================================================
+    std::atomic<int> activeBlockType_ { static_cast<int>(BlockType::Violin) };
+    int              nextCustomSoundId_ = 1000;
 
     // =========================================================================
     // Edit popup

@@ -23,15 +23,17 @@ layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 
 uniform mat4 uVP;
+uniform vec3 uModelOffset;
 
 out vec3 vNormal;
 out vec3 vWorldPos;
 
 void main()
 {
+    vec3 worldPos = aPosition + uModelOffset;
     vNormal   = aNormal;
-    vWorldPos = aPosition;
-    gl_Position = uVP * vec4(aPosition, 1.0);
+    vWorldPos = worldPos;
+    gl_Position = uVP * vec4(worldPos, 1.0);
 }
 )glsl";
 
@@ -196,9 +198,10 @@ void Renderer::init()
 
     if (progVoxels)
     {
-        uVP_vox  = glGetUniformLocation(progVoxels, "uVP");
-        uLight   = glGetUniformLocation(progVoxels, "uLightDir");
-        uColor_v = glGetUniformLocation(progVoxels, "uBaseColor");
+        uVP_vox         = glGetUniformLocation(progVoxels, "uVP");
+        uLight          = glGetUniformLocation(progVoxels, "uLightDir");
+        uColor_v        = glGetUniformLocation(progVoxels, "uBaseColor");
+        uModelOffset_vox = glGetUniformLocation(progVoxels, "uModelOffset");
     }
 
     if (progUnlit)
@@ -419,7 +422,8 @@ void Renderer::renderOriginMarker(const Mat4& vp, const Vec3f& lightDir)
     glUseProgram(progVoxels);
     glUniformMatrix4fv(uVP_vox, 1, GL_FALSE, vp.m);
     glUniform3f(uLight,   lightDir.x, lightDir.y, lightDir.z);
-    glUniform3f(uColor_v, 0.9f, 0.15f, 0.1f);   // red origin marker
+    glUniform3f(uColor_v, 0.9f, 0.15f, 0.1f);
+    glUniform3f(uModelOffset_vox, 0.f, 0.f, 0.f);
 
     glBindVertexArray(vaoCube);
     glDrawArrays(GL_TRIANGLES, 0, cubeVertCount);
@@ -436,10 +440,34 @@ void Renderer::render(const Mat4& vp, const Vec3f& lightDir)
     glUseProgram(progVoxels);
     glUniformMatrix4fv(uVP_vox, 1, GL_FALSE, vp.m);
     glUniform3f(uLight,   lightDir.x, lightDir.y, lightDir.z);
-    glUniform3f(uColor_v, 0.38f, 0.62f, 0.92f);   // cool blue voxel colour
+    glUniform3f(uColor_v, 0.38f, 0.62f, 0.92f);
+    glUniform3f(uModelOffset_vox, 0.f, 0.f, 0.f);
 
     glBindVertexArray(vaoVoxels);
     glDrawArrays(GL_TRIANGLES, 0, voxelVertCount);
+    glBindVertexArray(0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// renderSolidBlock — one colored cube at an arbitrary grid position
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Renderer::renderSolidBlock(const Mat4& vp, const Vec3f& lightDir,
+                                const Vec3i& pos, const Vec3f& color)
+{
+    if (!progVoxels || cubeVertCount == 0) return;
+
+    glUseProgram(progVoxels);
+    glUniformMatrix4fv(uVP_vox, 1, GL_FALSE, vp.m);
+    glUniform3f(uLight,   lightDir.x, lightDir.y, lightDir.z);
+    glUniform3f(uColor_v, color.x, color.y, color.z);
+    glUniform3f(uModelOffset_vox,
+                static_cast<float>(pos.x),
+                static_cast<float>(pos.y),
+                static_cast<float>(pos.z));
+
+    glBindVertexArray(vaoCube);
+    glDrawArrays(GL_TRIANGLES, 0, cubeVertCount);
     glBindVertexArray(0);
 }
 

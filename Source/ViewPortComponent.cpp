@@ -21,6 +21,36 @@ static bool isInBounds(const Vec3i& pos)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Per-block color based on type.  Custom blocks get a deterministic palette
+// color derived from soundId so different custom WAVs look distinct.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static Vec3f getBlockColor(BlockType type, int soundId)
+{
+    switch (type)
+    {
+        case BlockType::Violin: return { 0.85f, 0.22f, 0.18f };
+        case BlockType::Piano:  return { 0.25f, 0.45f, 0.90f };
+        case BlockType::Drum:   return { 0.22f, 0.78f, 0.32f };
+        case BlockType::Custom:
+        {
+            static const Vec3f kPalette[] = {
+                { 0.92f, 0.92f, 0.92f },   // white
+                { 0.95f, 0.85f, 0.20f },   // yellow
+                { 0.20f, 0.85f, 0.85f },   // cyan
+                { 0.85f, 0.38f, 0.85f },   // magenta
+                { 0.95f, 0.55f, 0.18f },   // orange
+                { 0.65f, 0.48f, 0.90f },   // purple
+            };
+            constexpr int kPaletteSize = sizeof(kPalette) / sizeof(kPalette[0]);
+            int idx = ((soundId % kPaletteSize) + kPaletteSize) % kPaletteSize;
+            return kPalette[idx];
+        }
+    }
+    return { 0.5f, 0.5f, 0.5f };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Constructor / Destructor
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -31,9 +61,26 @@ ViewPortComponent::ViewPortComponent()
     openGLContext.setRenderer(this);
     openGLContext.attachTo(*this);
     openGLContext.setContinuousRepainting(true);
+    // Legacy test tones (backward compat for any soundId = 0/1/2 blocks)
     audioEngine.generateTestTone(0, 440.0f, 2.0);
     audioEngine.generateTestTone(1, 660.0f, 2.0);
     audioEngine.generateTestTone(2, 880.0f, 2.0);
+
+    // Violin presets (synthesised test tones until real samples are added)
+    audioEngine.generateTestTone(100, 220.0f, 2.0);   // A3
+    audioEngine.generateTestTone(101, 294.0f, 2.0);   // D4
+    audioEngine.generateTestTone(102, 196.0f, 2.0);   // G3
+
+    // Piano presets
+    audioEngine.generateTestTone(200, 262.0f, 2.0);   // C4
+    audioEngine.generateTestTone(201, 440.0f, 2.0);   // A4
+    audioEngine.generateTestTone(202, 523.0f, 2.0);   // C5
+
+    // Drum presets
+    audioEngine.generateTestTone(300,  80.0f, 0.4);   // Kick
+    audioEngine.generateTestTone(301, 200.0f, 0.3);   // Snare
+    audioEngine.generateTestTone(302, 800.0f, 0.15);  // Hi-Hat
+
     audioEngine.start();
 }
 
@@ -227,10 +274,12 @@ void ViewPortComponent::renderOpenGL()
         if (valid)
         {
             voxelGrid.add(placePos);
+            const auto placedType = static_cast<BlockType>(activeBlockType_.load());
             BlockEntry newBlock;
-            newBlock.serial  = nextSerial++;
-            newBlock.pos     = placePos;
-            newBlock.soundId = 0;
+            newBlock.serial    = nextSerial++;
+            newBlock.blockType = placedType;
+            newBlock.pos       = placePos;
+            newBlock.soundId   = blockTypeDefaultSoundId(placedType);
             blockList.push_back(newBlock);
             lastPlacedPos = placePos;
             renderer.meshDirty = true;
@@ -279,9 +328,9 @@ void ViewPortComponent::renderOpenGL()
         }
     }
 
-    // ── Rebuild mesh ──────────────────────────────────────────────────────────
-    if (renderer.meshDirty)
-        renderer.rebuildVoxelMesh(voxelGrid);
+    // Per-block rendering replaces the old batch VBO path.
+    // VoxelGrid is still maintained for raycasting — just skip the GPU mesh.
+    renderer.meshDirty = false;
 
     // ── Sequencer + audio ────────────────────────────────────────────────
     {
@@ -366,8 +415,12 @@ void ViewPortComponent::renderOpenGL()
     Vec3f lightDir     = Vec3f(0.55f, 1.f, 0.4f).normalized();
 
     renderer.renderGrid(vp);
-    renderer.render(vp, lightDir);
     renderer.renderOriginMarker(vp, lightDir);
+
+    // Per-block colored rendering
+    for (const auto& b : blockList)
+        renderer.renderSolidBlock(vp, lightDir, b.pos,
+                                  getBlockColor(b.blockType, b.soundId));
     
 
     // ── Highlights ────────────────────────────────────────────────────────────
@@ -616,13 +669,15 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
                 if (b.pos == hit.voxelPos)
                 {
                     selectedSerial = b.serial;
- 
+
                     if (onRequestBlockEdit)
                         onRequestBlockEdit(b.serial,
+                                           b.blockType,
                                            b.startTimeSec,
                                            b.durationSec,
                                            b.soundId,
-                                           e.getPosition());  // ViewPort-local coords
+                                           juce::String(b.customFilePath),
+                                           e.getPosition());
                     return;
                 }
             }

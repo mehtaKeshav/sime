@@ -16,14 +16,19 @@
 // ViewPortComponent.h gets both automatically.
 // ─────────────────────────────────────────────────────────────────────────────
 
+#include "BlockType.h"
+#include <string>
+
 struct BlockEntry
 {
     // ── Identity ──────────────────────────────────────────────────────────────
-    int   serial = 0;
-    Vec3i pos;               ///< Requires Vec3i from MathUtils.h
+    int       serial    = 0;
+    BlockType blockType = BlockType::Violin;
+    Vec3i     pos;               ///< Requires Vec3i from MathUtils.h
 
     // ── Audio mapping ─────────────────────────────────────────────────────────
-    int   soundId = -1;      ///< -1 = silent / unassigned
+    int         soundId        = -1;   ///< -1 = silent / unassigned
+    std::string customFilePath;        ///< Non-empty for Custom blocks with user WAV
 
     // ── Timing (seconds relative to transport origin) ─────────────────────────
     double startTimeSec = 0.0;

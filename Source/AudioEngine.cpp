@@ -43,6 +43,12 @@ void AudioEngine::clearSamples()
 }
 
 // ---------------------------------------------------------------------------
+bool AudioEngine::hasSample(int soundId) const
+{
+    return sampleLibrary_.count(soundId) > 0;
+}
+
+// ---------------------------------------------------------------------------
 void AudioEngine::generateTestTone(int soundId, float frequencyHz, double durationSec)
 {
     constexpr double kGenRate = 44100.0;

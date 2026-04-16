@@ -83,6 +83,9 @@ public:
     /// Remove all loaded samples (call with audio stopped).
     void clearSamples();
 
+    /// Returns true if sampleLibrary_ already contains this soundId.
+    bool hasSample(int soundId) const;
+
     // -----------------------------------------------------------------------
     // Event ingestion
     // Call from the same thread that runs SequencerEngine::update()
