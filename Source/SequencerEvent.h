@@ -10,10 +10,10 @@
  
 enum class SequencerEventType
 {
-    Start,  ///< Begin playing soundId for this block
-    Stop    ///< Stop the voice that was started for this block
+    Start,
+    Stop,
+    Movement  // ← ADD THIS
 };
- 
 struct SequencerEvent
 {
     SequencerEventType type    = SequencerEventType::Start;

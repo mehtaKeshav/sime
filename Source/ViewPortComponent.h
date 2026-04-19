@@ -96,6 +96,40 @@ public:
         }
         selectedSerial = -1;
     }
+
+    /// Called by MainComponent when movement recording is confirmed
+    void confirmMovementRecording(int serial, double duration)
+    {
+        for (auto& b : blockList)
+        {
+            if (b.serial == serial)
+            {
+                b.durationSec = duration;
+                b.durationLocked = true;
+                b.hasRecordedMovement = true;
+                b.isRecordingMovement = false;
+                DBG("Movement recording confirmed for block " << serial 
+                    << " with " << b.recordedMovement.size() << " keyframes");
+                break;
+            }
+        }
+        recordingBlockSerial = -1;
+    }
+
+    /// Called when movement recording is cancelled
+    void cancelMovementRecording(int serial)
+    {
+        for (auto& b : blockList)
+        {
+            if (b.serial == serial)
+            {
+                b.recordedMovement.clear();
+                b.isRecordingMovement = false;
+                break;
+            }
+        }
+        recordingBlockSerial = -1;
+    }
  
     /// Clear the selected block highlight (called when popup is cancelled)
     void clearSelectedBlock()
@@ -106,9 +140,9 @@ public:
 
     // ── Transport state queries (called by MainComponent to update transport bar) ─────
 
-    bool   isTransportPlaying() const noexcept { return transport.isPlaying(); }
-    bool   isTransportPaused()  const noexcept { return transport.isPaused();  }
-    double getTransportTime()   const noexcept { return transport.currentTimeSec(); }
+    bool   isTransportPlaying() const noexcept { return transportClock.isPlaying(); }
+    bool   isTransportPaused()  const noexcept { return transportClock.isPaused();  }
+    double getTransportTime()   const noexcept { return transportClock.currentTimeSec(); }
 
     double getTransportDuration() const noexcept
     {
@@ -118,14 +152,16 @@ public:
         return maxEnd;
     }
 
-    void transportPlay()  { transport.start(); }
-    void transportPause() { transport.pause(); }
+    void transportPlay()  { transportClock.start(); }
+    void transportPause() { transportClock.pause(); }
     void transportStop()
     {
-        transport.stop();
+        transportClock.stop();
         SequencerEngine::resetAllBlocks(blockList);
     }
-
+    std::function<void(int serial, double duration, 
+                    const std::vector<MovementKeyFrame>& keyframes,
+                    juce::Point<int>)> onRequestMovementConfirm;
 
 
 private:
@@ -153,7 +189,7 @@ private:
     // so they live as long as the viewport.  AudioEngine manages its own
     // juce::AudioDeviceManager internally (prototype approach).
     // =========================================================================
-    TransportClock  transport;
+    TransportClock  transportClock;
     SequencerEngine sequencer;
     AudioEngine     audioEngine;
 
@@ -224,6 +260,12 @@ private:
     // Frame timing
     // =========================================================================
     double lastRenderTime = 0.0;   ///< juce::Time::getMillisecondCounterHiRes() at last frame
+
+    // Movement recording state
+    bool recordKeyHeld = false;
+    int recordingBlockSerial = -1;
+    Vec3i dragStartPos;
+    
 
     // =========================================================================
     // HUD

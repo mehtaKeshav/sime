@@ -338,8 +338,30 @@ void AudioEngine::dispatchEvent(const SequencerEvent& ev)
 {
     if (ev.type == SequencerEventType::Start)
         handleStartEvent(ev);
-    else
+    else if (ev.type == SequencerEventType::Stop)
         handleStopEvent(ev);
+    else if (ev.type == SequencerEventType::Movement)
+    {
+        // Update spatial position of playing voice
+        for (auto& voice : activeVoices_)
+        {
+            if (voice.blockSerial == ev.blockSerial && !voice.isFinished())
+            {
+                // Update pan based on X position (simple spatial audio)
+                float pan = juce::jmap(ev.blockX, -20.0f, 20.0f, -1.0f, 1.0f);
+                voice.pan = juce::jlimit(-1.0f, 1.0f, pan);
+                
+                // Recalculate gains
+                float leftGain = (1.0f - voice.pan) * 0.5f;
+                float rightGain = (1.0f + voice.pan) * 0.5f;
+                voice.leftGain = voice.gain * leftGain;
+                voice.rightGain = voice.gain * rightGain;
+                
+                DBG("Updated spatial audio for block " << ev.blockSerial 
+                    << " at X=" << ev.blockX << ", pan=" << voice.pan);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
