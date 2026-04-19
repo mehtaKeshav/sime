@@ -114,7 +114,7 @@ void ViewPortComponent::renderOpenGL()
     dt = std::min(dt, 0.1f);
     lastRenderTime = now;
 
-    transport.update(static_cast<double>(dt));
+    transportClock.update(static_cast<double>(dt));
     // ── Camera: mouse look ────────────────────────────────────────────────────
     {
         juce::ScopedLock lock(mouseMutex);
@@ -334,13 +334,60 @@ void ViewPortComponent::renderOpenGL()
 
     // ── Sequencer + audio ────────────────────────────────────────────────
     {
-        const auto events = sequencer.update(transport, blockList);
+        const auto events = sequencer.update(transportClock, blockList);
+        
+        // Process movement events and update voxel grid
+        for (const auto& ev : events)
+        {
+            if (ev.type == SequencerEventType::Movement)
+            {
+                for (auto& b : blockList)
+                {
+                    if (b.serial == ev.blockSerial)
+                    {
+                        // Remove from old position
+                        voxelGrid.remove(b.pos);
+                        
+                        // Update to new position
+                        Vec3i newPos = {
+                            static_cast<int>(ev.blockX),
+                            static_cast<int>(ev.blockY),
+                            static_cast<int>(ev.blockZ)
+                        };
+                        b.pos = newPos;
+                        
+                        // Add at new position
+                        voxelGrid.add(newPos);
+                        renderer.meshDirty = true;
+                        
+                        DBG("Block " << b.serial << " moved to (" 
+                            << newPos.x << "," << newPos.y << "," << newPos.z << ")");
+                        break;
+                    }
+                }
+            }
+        }
+        
         audioEngine.processEvents(events);
  
-        // Detect loop wrap (transport time jumped backwards)
-        const double curT = transport.currentTimeSec();
-        if (transport.isLooping() && curT < prevTransportTime)
+        // Detect loop wrap (transportClock time jumped backwards)
+        const double curT = transportClock.currentTimeSec();
+        if (transportClock.isLooping() && curT < prevTransportTime)
+        {
             SequencerEngine::resetAllBlocks(blockList);
+            
+            // Reset positions to initial keyframe
+            for (auto& b : blockList)
+            {
+                if (b.hasRecordedMovement && !b.recordedMovement.empty())
+                {
+                    voxelGrid.remove(b.pos);
+                    b.pos = b.recordedMovement[0].position;
+                    voxelGrid.add(b.pos);
+                }
+            }
+            renderer.meshDirty = true;
+        }
         prevTransportTime = curT;
     }
 
@@ -478,6 +525,29 @@ void ViewPortComponent::renderOpenGL()
         for (const auto& b : blockList)
             if (b.serial != selectedSerial)
                 renderer.renderHighlight(vp, b.pos, Vec3f{ 0.6f, 0.5f, 0.1f });
+    }
+
+    if (editMode && recordKeyHeld && recordingBlockSerial >= 0)
+    {
+        for (auto& b : blockList)
+        {
+            if (b.serial == recordingBlockSerial && b.isRecordingMovement)
+            {
+                double currentTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                double relativeTime = currentTime - b.recordingStartTime;
+                
+                // Only record if position changed from last keyframe
+                if (b.recordedMovement.empty() || 
+                    b.recordedMovement.back().position != b.pos)
+                {
+                    b.recordedMovement.push_back(MovementKeyFrame{ relativeTime, b.pos });
+                    DBG("Keyframe " << b.recordedMovement.size() 
+                        << " at time " << relativeTime 
+                        << " pos (" << b.pos.x << "," << b.pos.y << "," << b.pos.z << ")");
+                }
+                break;
+            }
+        }
     }
 // ── HUD ─────────────────────────────────────────────────────────
     
@@ -703,13 +773,139 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
     // raycast avoids the camera race-condition that caused missed placements.
     if (e.mods.isLeftButtonDown())
     {
-        juce::ScopedLock lock(clickMutex);
-        pendingPlace = { true, e.position.x, e.position.y, e.mods.isShiftDown() };
+        if (editMode){
+
+        }
+        else{
+            juce::ScopedLock lock(clickMutex);
+            pendingPlace = { true, e.position.x, e.position.y, e.mods.isShiftDown() };
+
+        } // no placements in edit mode
+      
+    }
+
+
+
+    // ── Edit mode + Alt: LEFT-click to select and start recording ────────────
+    if (editMode && e.mods.isLeftButtonDown() && e.mods.isAltDown())
+    {
+        DBG("Alt+Left click - selecting block for recording");
+        
+        const int   w = getWidth(), h = getHeight();
+        const float aspect = (h > 0) ? (float)w / h : 1.f;
+        const Mat4  view_  = camera.getViewMatrix();
+        const Mat4  proj   = camera.getProjectionMatrix(aspect);
+        Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
+                                              (float)w, (float)h, view_, proj);
+        RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
+ 
+        if (hit.hit)
+        {
+            DBG("Hit voxel at (" << hit.voxelPos.x << "," << hit.voxelPos.y << "," << hit.voxelPos.z << ")");
+            
+            for (auto& b : blockList)
+            {
+                if (b.pos == hit.voxelPos)
+                {
+                    selectedSerial = b.serial;
+                    dragStartPos = b.pos;
+                    recordKeyHeld = true;  // Start recording immediately
+                    
+                    // Start recording
+                    b.isRecordingMovement = true;
+                    b.recordingStartTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                    b.recordingStartPos = b.pos;
+                    b.recordedMovement.clear();
+                    recordingBlockSerial = b.serial;
+                    
+                    // Add initial keyframe (fix: MovementKeyframe not MovementKeyFrame)
+                    b.recordedMovement.push_back(MovementKeyFrame{ 0.0, b.pos});
+                    DBG("Started recording movement for block " << b.serial);
+                    return;
+                }
+            }
+        }
+        
+        return;  // Don't do normal placement while Alt is held
+    }
+
+
+     if (editMode && e.mods.isLeftButtonDown() && !e.mods.isAltDown())
+    {
+        // ... existing selection code without recording ...
+        const int   w = getWidth(), h = getHeight();
+        const float aspect = (h > 0) ? (float)w / h : 1.f;
+        const Mat4  view_  = camera.getViewMatrix();
+        const Mat4  proj   = camera.getProjectionMatrix(aspect);
+        Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
+                                              (float)w, (float)h, view_, proj);
+        RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
+ 
+        if (hit.hit)
+        {
+            for (auto& b : blockList)
+            {
+                if (b.pos == hit.voxelPos)
+                {
+                    selectedSerial = b.serial;
+                    dragStartPos = b.pos;
+                    DBG("Block " << b.serial << " selected (no recording)");
+                    return;
+                }
+            }
+        }
+        
+        selectedSerial = -1;
+        return;
     }
 }
 
 void ViewPortComponent::mouseUp(const juce::MouseEvent& e)
 {
+    
+    // ── Stop recording if Alt+drag was happening ──────────────────────────────
+    if (recordKeyHeld)
+    {
+        recordKeyHeld = false;
+        
+        if (recordingBlockSerial >= 0)
+        {
+            for (auto& b : blockList)
+            {
+                if (b.serial == recordingBlockSerial)
+                {
+                    double recordedDuration = (juce::Time::getMillisecondCounterHiRes() * 0.001) 
+                                             - b.recordingStartTime;
+                    
+                    DBG("Recording ended. Duration: " << recordedDuration 
+                        << ", Keyframes: " << b.recordedMovement.size());
+                    
+                    if (b.recordedMovement.size() > 1)  // Need at least 2 keyframes
+                    {
+                        b.isRecordingMovement = false;
+                        
+                        // Show confirmation popup
+                        if (onRequestMovementConfirm)
+                        {
+                            auto mousePos = getMouseXYRelative();
+                            onRequestMovementConfirm(b.serial, recordedDuration, b.recordedMovement, mousePos);
+
+                        }
+                    }
+                    else
+                    {
+                        // Not enough movement, cancel
+                        b.recordedMovement.clear();
+                        b.isRecordingMovement = false;
+                        recordingBlockSerial = -1;
+                        DBG("Recording cancelled - insufficient movement");
+                    }
+                    break;
+                }
+            }
+        }
+        return;
+    }
     // Check our own rightDown flag — JUCE clears button from mods before mouseUp fires.
     bool wasRight;
     {
@@ -728,8 +924,133 @@ void ViewPortComponent::mouseUp(const juce::MouseEvent& e)
     // LMB release — do nothing (placement happened on mouseDown)
 }
 
+
+
+// bool ViewPortComponent::keyStateChanged(bool isKeyDown)
+// {
+//     // Alt key released – stop recording and show popup
+//     if (!isKeyDown && recordKeyHeld)
+//     {
+//         recordKeyHeld = false;
+        
+//         if (recordingBlockSerial >= 0)
+//         {
+//             for (auto& b : blockList)
+//             {
+//                 if (b.serial == recordingBlockSerial)
+//                 {
+//                     double recordedDuration = (juce::Time::getMillisecondCounterHiRes() * 0.001) 
+//                                              - b.recordingStartTime;
+                    
+//                     if (b.recordedMovement.size() > 1)
+//                     {
+//                         b.isRecordingMovement = false;
+                        
+//                         // Show confirmation popup WITH KEYFRAMES
+//                         if (onRequestMovementConfirm)
+//                         {
+//                             auto mousePos = getMouseXYRelative();
+//                             // Pass the recorded movement data
+//                             onRequestMovementConfirmWithPath(b.serial, 
+//                                                             recordedDuration, 
+//                                                             b.recordedMovement,
+//                                                             mousePos);
+//                         }
+//                     }
+//                     else
+//                     {
+//                         b.recordedMovement.clear();
+//                         b.isRecordingMovement = false;
+//                         recordingBlockSerial = -1;
+//                         DBG("Recording cancelled - insufficient movement");
+//                     }
+//                     break;
+//                 }
+//             }
+//         }
+//         return true;
+//     }
+    
+//     return Component::keyStateChanged(isKeyDown);
+// }
+
+
 void ViewPortComponent::mouseDrag(const juce::MouseEvent& e)
 {
+//   ── Recording mode: Alt+drag to move block ───────────────────────────────
+    if (editMode && e.mods.isAltDown() && recordKeyHeld && selectedSerial >= 0)
+    {
+        DBG("Recording drag - selectedSerial: " << selectedSerial);
+        
+        const int   w = getWidth(), h = getHeight();
+        const float aspect = (h > 0) ? (float)w / h : 1.f;
+        const Mat4  view_  = camera.getViewMatrix();
+        const Mat4  proj   = camera.getProjectionMatrix(aspect);
+        Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
+                                              (float)w, (float)h, view_, proj);
+        
+        // Find target position (ground plane or existing block face)
+        Vec3i targetPos;
+        bool validTarget = false;
+        
+        RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
+        if (hit.hit)
+        {
+            targetPos = Raycaster::getPlacementPos(hit);
+            validTarget = (targetPos.y >= 0) && isInBounds(targetPos);
+        }
+        else
+        {
+            Vec3i gp = Raycaster::groundPlaneHit(camera.getPosition(), rayDir);
+            if (gp != Vec3i{})
+            {
+                targetPos = gp;
+                validTarget = (targetPos.y >= 0) && isInBounds(targetPos);
+            }
+        }
+        
+        if (validTarget && targetPos != Vec3i{0, 0, 0})
+        {
+            // Move the block
+            for (auto& b : blockList)
+            {
+                if (b.serial == selectedSerial)
+                {
+                    // Remove from old position
+                    voxelGrid.remove(b.pos);
+                    
+                    // Check if target is occupied by another block
+                    bool occupied = false;
+                    for (const auto& other : blockList)
+                    {
+                        if (other.serial != selectedSerial && other.pos == targetPos)
+                        {
+                            occupied = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!occupied)
+                    {
+                        DBG("Moving block from (" << b.pos.x << "," << b.pos.y << "," << b.pos.z 
+                            << ") to (" << targetPos.x << "," << targetPos.y << "," << targetPos.z << ")");
+                        
+                        b.pos = targetPos;
+                        voxelGrid.add(targetPos);
+                        renderer.meshDirty = true;
+                    }
+                    else
+                    {
+                        // Re-add at old position if target occupied
+                        voxelGrid.add(b.pos);
+                    }
+                    break;
+                }
+            }
+        }
+        return;
+    }
+
     {
         juce::ScopedLock lock(mouseMutex);
         mouse.curX = e.position.x;
@@ -821,6 +1142,36 @@ bool ViewPortComponent::keyPressed(const juce::KeyPress& k)
         editMode = !editMode;
         selectedSerial = -1;
         juce::MessageManager::callAsync([this]() { repaint(); });
+        return true;
+    }
+
+    if (k.getModifiers().isAltDown())
+    {
+        if (editMode && selectedSerial >= 0)
+        {
+            recordKeyHeld = true;
+            
+            for (auto& b : blockList)
+            {
+                if (b.serial == selectedSerial)
+                {
+                    if (!b.isRecordingMovement)
+                    {
+                        // Start recording
+                        b.isRecordingMovement = true;
+                        b.recordingStartTime = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                        b.recordingStartPos = b.pos;
+                        b.recordedMovement.clear();
+                        recordingBlockSerial = b.serial;
+                        
+                        // Add initial keyframe 
+                        b.recordedMovement.push_back(MovementKeyFrame{ 0.0, b.pos });
+                        DBG("Started recording movement for block " << b.serial);
+                    }
+                    break;
+                }
+            }
+        }
         return true;
     }
 

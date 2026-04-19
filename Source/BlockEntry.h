@@ -18,7 +18,11 @@
 
 #include "BlockType.h"
 #include <string>
-
+struct MovementKeyFrame
+{
+    double timeSec;   // Time relative to block start
+    Vec3i  position;  // Absolute world position at this keyframe
+};
 struct BlockEntry
 {
     // ── Identity ──────────────────────────────────────────────────────────────
@@ -34,6 +38,20 @@ struct BlockEntry
     double startTimeSec = 0.0;
     double durationSec  = 1.0;
 
+    // Recording state
+    bool isRecordingMovement = false;
+    double recordingStartTime = 0.0;
+    Vec3i recordingStartPos;
+
+    // recorded movement data
+    bool hasRecordedMovement = false; ///< Whether this block has any recorded movement keyframes
+    std::vector<MovementKeyFrame> recordedMovement; ///< Optional per-block movement path for sequenced motion
+    bool durationLocked = false;
+
+    // Playback state for movement
+    size_t currentKeyframeIndex = 0;
+    std::vector<bool> triggeredKeyframes;
+
     // ── Playback state (written by SequencerEngine each frame) ────────────────
     bool hasStarted  = false;
     bool hasFinished = false;
@@ -42,10 +60,17 @@ struct BlockEntry
     // ── Helpers ───────────────────────────────────────────────────────────────
     double endTimeSec() const noexcept { return startTimeSec + durationSec; }
 
-    void resetPlaybackState() noexcept
+    void resetPlaybackState()
     {
-        hasStarted  = false;
+        hasStarted = false;
         hasFinished = false;
-        isPlaying   = false;
+        isPlaying = false;
+        currentKeyframeIndex = 0;
+        
+        triggeredKeyframes.clear();
+        if (hasRecordedMovement && !recordedMovement.empty())
+        {
+            triggeredKeyframes.resize(recordedMovement.size(), false);
+        }
     }
 };

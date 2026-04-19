@@ -20,6 +20,10 @@ public:
     /// Call once per frame from the GL / render thread.
     std::vector<SequencerEvent> update(const TransportClock&    clock,
                                        std::vector<BlockEntry>& blocks);
+                                       
+    /// Process recorded movement for blocks during playback
+    static void updateBlockMovement(std::vector<BlockEntry>& blocks, 
+                                     double currentTime);
 
     /// Reset all block playback state — call after transport stop or loop wrap.
     static void resetAllBlocks(std::vector<BlockEntry>& blocks) noexcept;

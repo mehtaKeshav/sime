@@ -5,6 +5,7 @@
 #include "BlockEditPopup.h"
 #include "TransportBarComponent.h"
 #include "BlockType.h"
+#include "MovementConfirmPopup.h"
 
 class MainComponent : public juce::Component, private juce::Timer
 {
@@ -19,6 +20,7 @@ private:
     SidebarComponent  sidebar;
     BlockEditPopup    editPopup;
     TransportBarComponent transportBar;
+    std::unique_ptr<MovementConfirmPopup> movementPopup;
     bool isSidebarCollapsed = false;
 
     // ── Block type toolbar ────────────────────────────────────────────────────
@@ -31,7 +33,9 @@ private:
     void refreshToolbarColors();
 
     static constexpr int kToolbarH = 34;
-
+    void showMovementConfirmPopup(int serial, double duration, 
+                              const std::vector<MovementKeyFrame>& keyframes,
+                              juce::Point<int> position);
     void timerCallback() override;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

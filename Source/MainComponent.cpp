@@ -62,8 +62,47 @@ MainComponent::MainComponent()
         view.clearSelectedBlock();
     };
 
+    view.onRequestMovementConfirm = 
+        [this](int serial, double duration, 
+               const std::vector<MovementKeyFrame>& keyframes,
+               juce::Point<int> pos)
+    {
+        showMovementConfirmPopup(serial, duration, keyframes, pos);
+    };
+
     // ── Poll transport state at 30 Hz ─────────────────────────────────────────
     startTimerHz(30);
+}
+
+void MainComponent::showMovementConfirmPopup(int serial, 
+                                             double duration,
+                                             const std::vector<MovementKeyFrame>& keyframes,
+                                             juce::Point<int> position)
+{
+    auto* popup = new MovementConfirmPopup(serial, duration, keyframes);  // ← Pass keyframes
+    
+    popup->onConfirm = [this, serial](int s, double d)
+    {
+        view.confirmMovementRecording(s, d);
+    };
+    
+    popup->onCancel = [this, serial](int s)
+    {
+        view.cancelMovementRecording(s);
+    };
+    
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(popup);
+    options.dialogTitle = "Confirm Movement Recording";
+    options.dialogBackgroundColour = juce::Colour(0xff2a2a2a);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = false;
+    options.resizable = false;
+    
+    auto* dialog = options.launchAsync();
+    
+    if (dialog)
+        dialog->centreWithSize(400, 300);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -157,4 +196,9 @@ void MainComponent::resized()
 
     // 3D viewport — whatever remains
     view.setBounds(area);
+
+    if (movementPopup)
+    {
+        movementPopup->toFront(false);  // Don't give it keyboard focus
+    }
 }
