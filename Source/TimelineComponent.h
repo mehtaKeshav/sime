@@ -130,7 +130,6 @@ private:
     void paintPlayhead(juce::Graphics& g, juce::Rectangle<int> area);
     void paintBeatGrid(juce::Graphics& g, juce::Rectangle<int> tracksArea);
     
-    juce::Colour getBlockColor(BlockType type, int soundId) const;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimelineComponent)
 };

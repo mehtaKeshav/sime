@@ -251,18 +251,6 @@ double TimelineComponent::xToTime(float x) const
     return viewStartTime_ + (x / pixelsPerSecond_);
 }
 
-juce::Colour TimelineComponent::getBlockColor(BlockType type, int soundId) const
-{
-    switch (type)
-    {
-        case BlockType::Violin: return juce::Colour(0xffc03528);
-        case BlockType::Piano:  return juce::Colour(0xff3366cc);
-        case BlockType::Drum:   return juce::Colour(0xff2eaa44);
-        case BlockType::Custom: return juce::Colour(0xff666688);
-    }
-    return juce::Colours::grey;
-}
-
 void TimelineComponent::resized()
 {
     playheadAnchorX_ = getWidth() / 3;
