@@ -447,6 +447,7 @@ void ViewPortComponent::renderOpenGL()
             newBlock.blockType = placedType;
             newBlock.pos       = placePos;
             newBlock.soundId   = blockTypeDefaultSoundId(placedType);
+            newBlock.colour = getBlockColor(placedType, newBlock.soundId);
 
             // BUG-S1 fix: stagger start time so new blocks don't all pile up at t=0.
             // Assign start = end of the last block, so each new block follows the previous.
@@ -641,8 +642,7 @@ void ViewPortComponent::renderOpenGL()
 
     // Per-block colored rendering
     for (const auto& b : blockList)
-        renderer.renderSolidBlock(vp, lightDir, b.pos,
-                                  getBlockColor(b.blockType, b.soundId));
+        renderer.renderSolidBlock(vp, lightDir, b.pos, b.colour);
     
 
     // ── Highlights ────────────────────────────────────────────────────────────

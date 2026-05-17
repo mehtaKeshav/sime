@@ -3,6 +3,7 @@
 #include "MathUtils.h"
 #include "BlockEntry.h"
 #include "BlockType.h"
+#include "MathUtils.h"
 
 
 enum class DragMode
@@ -57,6 +58,7 @@ private:
         double duration;
         int trackIndex;  // Which row to draw in
         juce::String label;
+        Vec3f color;
     };
     // =========================
     // Rhythm / grid settings

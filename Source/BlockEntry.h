@@ -32,6 +32,7 @@ struct BlockEntry
     int       serial    = 0;
     BlockType blockType = BlockType::Violin;
     Vec3i     pos;               ///< Requires Vec3i from MathUtils.h
+    Vec3f     colour;
 
     // ── Audio mapping ─────────────────────────────────────────────────────────
     int         soundId        = -1;   ///< -1 = silent / unassigned

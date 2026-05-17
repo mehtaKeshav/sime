@@ -25,6 +25,7 @@ void TimelineComponent::setBlocks(const std::vector<BlockEntry>& blocks)
         region.duration = block.durationSec;
         region.trackIndex = serialToTrack[block.serial];
         region.label = "Block #" + juce::String(block.serial);
+        region.color = block.colour;
         
         regions_.push_back(region);
         
@@ -203,7 +204,7 @@ void TimelineComponent::paintTracks(juce::Graphics& g, juce::Rectangle<int> area
         juce::Rectangle<int> blockRect(x, y, w, h);
         
         // Block color
-        juce::Colour color = getBlockColor(region.type, 0);
+        juce::Colour color = juce::Colour::fromFloatRGBA(region.color.x, region.color.y, region.color.z, 1.0f);
         g.setColour(color.withAlpha(0.9f));
         g.fillRoundedRectangle(blockRect.toFloat(), 3.0f);
         
