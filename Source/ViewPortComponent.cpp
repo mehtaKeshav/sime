@@ -623,7 +623,10 @@ void ViewPortComponent::renderOpenGL()
     // but keep aspect ratio from logical size so it matches the raycast.
     const float scale = (float)openGLContext.getRenderingScale();
     glViewport(0, 0, (int)(w * scale), (int)(h * scale));
-    glClearColor(0.12f, 0.13f, 0.18f, 1.f);
+    if (editMode)
+        glClearColor(0.28f, 0.04f, 0.04f, 1.f);   // dark red in edit mode
+    else
+        glClearColor(0.12f, 0.13f, 0.18f, 1.f);   // normal dark background
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
@@ -922,44 +925,15 @@ void ViewPortComponent::paint(juce::Graphics& g)
         isEditMode = hud.isEditMode;
     }
 
-    // ── Edit mode viewport border ─────────────────────────────────────────────
-    if (isEditMode)
-    {
-        const juce::Colour editColour(0xff3D6FCC);  // blue, matches Piano block colour
-        g.setColour(editColour.withAlpha(0.55f));
-        g.drawRect(0, 0, getWidth(), getHeight(), 3);
-    }
-
     if (txt.isNotEmpty())
     {
-        g.setColour(juce::Colours::black.withAlpha(0.65f));
-        g.fillRect(0, 0, getWidth(), 22);
+        g.setColour(juce::Colours::black);
+        g.fillRect(0, 0, getWidth(), 26);
 
-        g.setFont(juce::Font(13.f));
+        g.setFont(juce::Font("Inter", 15.f, juce::Font::plain));
         g.setColour(juce::Colour(0xffdddddd));
-        g.drawText(txt, 8, 3, getWidth() - 16, 18,
+        g.drawText(txt, 8, 4, getWidth() - 16, 20,
                    juce::Justification::centredLeft, true);
-    }
-
-    // ── Edit mode pill (centered top) ─────────────────────────────────────────
-    if (isEditMode)
-    {
-        constexpr int kPillW = 180, kPillH = 24;
-        const int pillX = (getWidth() - kPillW) / 2;
-        constexpr int pillY = 30;
-
-        g.setColour(juce::Colour(0xcc1a243a));
-        g.fillRoundedRectangle((float)pillX, (float)pillY,
-                               (float)kPillW, (float)kPillH, 12.f);
-        g.setColour(juce::Colour(0xff3D6FCC));
-        g.drawRoundedRectangle((float)pillX, (float)pillY,
-                               (float)kPillW, (float)kPillH, 12.f, 1.f);
-
-        g.setFont(juce::Font(11.f, juce::Font::bold));
-        g.setColour(juce::Colour(0xff6699ff));
-        g.drawText("EDIT MODE  —  Tab to exit",
-                   pillX, pillY, kPillW, kPillH,
-                   juce::Justification::centred, false);
     }
 
     // ── Recording indicator (red dot + REC label) — left side ────────────────
