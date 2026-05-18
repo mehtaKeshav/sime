@@ -57,6 +57,12 @@ TransportBarComponent::TransportBarComponent()
             onBlockEdited(serial, start, duration);
     };
 
+    timeline.onPlayheadMoved = [this](double newTimeSec)
+    {
+        if (onPlayheadMoved)
+            onPlayheadMoved(newTimeSec);
+    };
+
     timeline.onRectRegionClicked = [this](int serial)
     {
         if (onTimelineBlockClicked)

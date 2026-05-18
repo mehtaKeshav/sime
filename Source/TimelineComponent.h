@@ -44,12 +44,13 @@ public:
     
     /// Callback when user drags to edit a block's timing
     std::function<void(int serial, double startTime, double duration)> onBlockEdited;
-
+    std::function<void(double newTimeSec)> onPlayheadMoved;
+    
     void setBpm(double newBpm);
     void setSnapToGrid(bool shouldSnap);
     void setSubdivision(int newSubdivision);
     
-private:
+    private:
     struct BlockRegion
     {
         int serial;
@@ -83,20 +84,22 @@ private:
     double xToTime(float x) const;
     
     double snapTime(double timeSeconds) const;
-
+    
     // =========================
     // Drawing helpers
     // =========================
     void drawBeatGrid(juce::Graphics& g);
     void drawTimelineBlocks(juce::Graphics& g);
     void drawPlayhead(juce::Graphics& g);
-
+    
     bool isPanningTimeline_ = false;
     bool isUserPanning_ = false;    
-
+    
     int lastDragX_ = 0;
     int lastDragY_ = 0;
-
+    
+    bool draggingPlayhead_ = false;
+    static constexpr int kPlayheadHitWidth = 10;
     int playheadAnchorX_ = 0;
     bool followPlayhead_ = true;
     void enableFollowPlayhead();
@@ -107,7 +110,7 @@ private:
     double verticalScroll_ = 0.0;
     double dragStartVerticalScroll_ = 0.0;
     bool isVerticalDragging_ = false;
-
+    
     int playheadX_ = getWidth() / 3;
     int selectedBlock_ = -1;
     DragMode dragMode_ = DragMode::None;

@@ -1663,3 +1663,8 @@ bool ViewPortComponent::exportSceneAudioToFile(const juce::File& outputFile,
         format,
         errorOut);
 }
+
+void ViewPortComponent::seekTransportClock(double newTimeSec)
+{
+    transportClock.seekTo(newTimeSec);
+} 

@@ -225,10 +225,7 @@ void TimelineComponent::paintTracks(juce::Graphics& g, juce::Rectangle<int> area
 
 void TimelineComponent::paintPlayhead(juce::Graphics& g, juce::Rectangle<int> area)
 {
-    int x = (int)timeToX(currentTime_);
-
-    if (x > playheadAnchorX_)
-        x = playheadAnchorX_;
+    int x = (int) timeToX(currentTime_);
 
     g.setColour(juce::Colours::yellow);
     g.drawLine(x, kRulerHeight, x, area.getBottom(), 2.0f);
@@ -291,6 +288,21 @@ void TimelineComponent::mouseWheelMove(const juce::MouseEvent& e,
 void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
 {
     // 1) Drag / resize block rectangles
+
+    if (draggingPlayhead_)
+    {
+        double newTime = xToTime(e.x);
+        newTime = juce::jmax(0.0, newTime);
+
+        currentTime_ = newTime;
+
+        if (onPlayheadMoved)
+            onPlayheadMoved(newTime);
+
+        repaint();
+        return;
+    }
+
     if (selectedBlock_ != -1 && dragMode_ != DragMode::None)
     {
         const double currentMouseTime = xToTime(static_cast<float>(e.x));
@@ -385,6 +397,10 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
 
 void TimelineComponent::mouseUp(const juce::MouseEvent& e)
 {
+    if (draggingPlayhead_)
+    {
+        draggingPlayhead_ = false;
+    }
     juce::ignoreUnused(e);
 
     isPanningTimeline_ = false;
@@ -396,12 +412,22 @@ void TimelineComponent::mouseUp(const juce::MouseEvent& e)
 
 void TimelineComponent::mouseDown(const juce::MouseEvent& e)
 {
-    if (e.y < kRulerHeight)
+     int playheadX = (int) timeToX(currentTime_);
+    if (std::abs(e.x - playheadX) < kPlayheadHitWidth){
+        draggingPlayhead_ = true;
+        return;
+    }
+    if (e.y <= kRulerHeight)
     {
-        isPanningTimeline_ = false;
-        isUserPanning_ = false;
-        selectedBlock_ = -1;
-        dragMode_ = DragMode::None;
+        double newTime = xToTime(e.x);
+        newTime = juce::jmax(0.0, newTime);
+
+        currentTime_ = newTime;
+
+        if (onPlayheadMoved)
+            onPlayheadMoved(newTime);
+
+        repaint();
         return;
     }
 
@@ -460,23 +486,22 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& e)
     }
 }
 
-void TimelineComponent::setCurrentTime(double time)
+void TimelineComponent::setCurrentTime(double timeSec)
 {
-    currentTime_ = time;
-
-    if (isPlaying_ && followPlayhead_ && !isUserPanning_)
+    currentTime_ = juce::jmax(0.0, timeSec);
+    if (isPlaying_)
     {
-        const double anchorTime = playheadAnchorX_ / pixelsPerSecond_;
+        float x = timeToX(currentTime_);
 
-        if (currentTime_ <= anchorTime)
-            viewStartTime_ = 0.0;
-        else
-            viewStartTime_ = currentTime_ - anchorTime;
+        if (x > playheadAnchorX_)
+        {
+            viewStartTime_ = currentTime_ - (playheadAnchorX_ / pixelsPerSecond_);
+            viewStartTime_ = juce::jmax(0.0, viewStartTime_);
+        }
     }
 
     repaint();
 }
-
 
 void TimelineComponent::enableFollowPlayhead()
 {

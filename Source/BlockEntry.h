@@ -112,8 +112,4 @@ struct BlockEntry
         auto c = blockTypeColor(type);
         return { c.getFloatRed(), c.getFloatGreen(), c.getFloatBlue() };
     }
-    // void refreshColor()
-    // {
-    //     colour = getBlockColor(blockType, soundId);
-    // }
 };
