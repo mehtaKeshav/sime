@@ -32,6 +32,7 @@ struct BlockEntry
     int       serial    = 0;
     BlockType blockType = BlockType::Violin;
     Vec3i     pos;               ///< Requires Vec3i from MathUtils.h
+    Vec3f     colour;
 
     // ── Audio mapping ─────────────────────────────────────────────────────────
     int         soundId        = -1;   ///< -1 = silent / unassigned
@@ -87,5 +88,28 @@ struct BlockEntry
         {
             triggeredKeyframes.resize(recordedMovement.size(), false);
         }
+    }
+
+    static Vec3f getBlockColor(BlockType type, int soundId)
+    {
+        // Custom blocks vary by soundId so different user WAVs look distinct.
+        if (type == BlockType::Custom)
+        {
+            static const Vec3f kPalette[] = {
+                { 0.92f, 0.92f, 0.92f },   // white
+                { 0.95f, 0.85f, 0.20f },   // yellow
+                { 0.20f, 0.85f, 0.85f },   // cyan
+                { 0.85f, 0.38f, 0.85f },   // magenta
+                { 0.95f, 0.55f, 0.18f },   // orange
+                { 0.65f, 0.48f, 0.90f },   // purple
+            };
+            constexpr int kPaletteSize = sizeof(kPalette) / sizeof(kPalette[0]);
+            int idx = ((soundId % kPaletteSize) + kPaletteSize) % kPaletteSize;
+            return kPalette[idx];
+        }
+
+        // Every other type: delegate to the canonical color helper in BlockType.h.
+        auto c = blockTypeColor(type);
+        return { c.getFloatRed(), c.getFloatGreen(), c.getFloatBlue() };
     }
 };

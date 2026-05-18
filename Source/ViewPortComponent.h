@@ -221,6 +221,8 @@ public:
                                  SceneAudioExporter::Format format,
                                  juce::String& errorOut);
 
+    void seekTransportClock(double newTimeSec);
+
 private:
     // ── Private helpers ───────────────────────────────────────────────────────
     void processKeyboardMovement(float dt);

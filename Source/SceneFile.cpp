@@ -5,11 +5,12 @@
 #include "SceneFile.h"
 #include <fstream>
 #include <cstring>
+#include "ViewPortComponent.h" // 
 
 namespace
 {
     static constexpr char     kMagic[4] = { 'S', 'I', 'M', 'E' };
-    static constexpr uint16_t kVersion  = 2;   // bumped from 1: adds loop fields
+    static constexpr uint16_t kVersion  = 3;   // bumped from 1: adds loop fields
 
     // Tiny endian-agnostic helpers (no-op on x86 but keeps intent clear)
     template <typename T>
@@ -41,6 +42,9 @@ bool SceneFile::save(const std::string& path, const std::vector<BlockEntry>& blo
         writeVal<int32_t>(f, b.pos.z);
 
         writeVal<int32_t>(f, b.soundId);
+        writeVal<int32_t>(f, static_cast<int32_t>(b.colour.x * 255.0f));
+        writeVal<int32_t>(f, static_cast<int32_t>(b.colour.y * 255.0f));
+        writeVal<int32_t>(f, static_cast<int32_t>(b.colour.z * 255.0f));
 
         uint16_t pathLen = static_cast<uint16_t>(b.customFilePath.size());
         writeVal<uint16_t>(f, pathLen);
@@ -161,6 +165,24 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
             // v1 default
             b.isLooping       = false;
             b.loopDurationSec = 4.0;
+        }
+        if (version >= 3)
+        {
+            int32_t r = 0, g = 0, bl = 0;
+
+            if (!readVal<int32_t>(f, r))  return false;
+            if (!readVal<int32_t>(f, g))  return false;
+            if (!readVal<int32_t>(f, bl)) return false;
+
+            b.colour = Vec3f {
+                juce::jlimit(0.0f, 1.0f, r / 255.0f),
+                juce::jlimit(0.0f, 1.0f, g / 255.0f),
+                juce::jlimit(0.0f, 1.0f, bl / 255.0f)
+            };
+        }
+        else
+        {
+            b.colour = b.getBlockColor(b.blockType, b.soundId); // fallback for old files
         }
 
         b.resetPlaybackState();

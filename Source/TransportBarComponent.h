@@ -46,6 +46,7 @@ public:
 
     std::function<void(int serial)> onTimelineBlockClicked;
     std::function<void(double)> onBpmChanged;
+    std::function<void(double newTimeSec)> onPlayheadMoved;
 
     
 

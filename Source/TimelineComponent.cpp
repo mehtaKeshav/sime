@@ -25,6 +25,7 @@ void TimelineComponent::setBlocks(const std::vector<BlockEntry>& blocks)
         region.duration = block.durationSec;
         region.trackIndex = serialToTrack[block.serial];
         region.label = "Block #" + juce::String(block.serial);
+        region.color = block.colour;
         
         regions_.push_back(region);
         
@@ -203,7 +204,7 @@ void TimelineComponent::paintTracks(juce::Graphics& g, juce::Rectangle<int> area
         juce::Rectangle<int> blockRect(x, y, w, h);
         
         // Block color
-        juce::Colour color = getBlockColor(region.type, 0);
+        juce::Colour color = juce::Colour::fromFloatRGBA(region.color.x, region.color.y, region.color.z, 1.0f);
         g.setColour(color.withAlpha(0.9f));
         g.fillRoundedRectangle(blockRect.toFloat(), 3.0f);
         
@@ -224,10 +225,7 @@ void TimelineComponent::paintTracks(juce::Graphics& g, juce::Rectangle<int> area
 
 void TimelineComponent::paintPlayhead(juce::Graphics& g, juce::Rectangle<int> area)
 {
-    int x = (int)timeToX(currentTime_);
-
-    if (x > playheadAnchorX_)
-        x = playheadAnchorX_;
+    int x = (int) timeToX(currentTime_);
 
     g.setColour(juce::Colours::yellow);
     g.drawLine(x, kRulerHeight, x, area.getBottom(), 2.0f);
@@ -248,18 +246,6 @@ float TimelineComponent::timeToX(double timeSeconds) const
 double TimelineComponent::xToTime(float x) const
 {
     return viewStartTime_ + (x / pixelsPerSecond_);
-}
-
-juce::Colour TimelineComponent::getBlockColor(BlockType type, int soundId) const
-{
-    switch (type)
-    {
-        case BlockType::Violin: return juce::Colour(0xffc03528);
-        case BlockType::Piano:  return juce::Colour(0xff3366cc);
-        case BlockType::Drum:   return juce::Colour(0xff2eaa44);
-        case BlockType::Custom: return juce::Colour(0xff666688);
-    }
-    return juce::Colours::grey;
 }
 
 void TimelineComponent::resized()
@@ -302,6 +288,21 @@ void TimelineComponent::mouseWheelMove(const juce::MouseEvent& e,
 void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
 {
     // 1) Drag / resize block rectangles
+
+    if (draggingPlayhead_)
+    {
+        double newTime = xToTime(e.x);
+        newTime = juce::jmax(0.0, newTime);
+
+        currentTime_ = newTime;
+
+        if (onPlayheadMoved)
+            onPlayheadMoved(newTime);
+
+        repaint();
+        return;
+    }
+
     if (selectedBlock_ != -1 && dragMode_ != DragMode::None)
     {
         const double currentMouseTime = xToTime(static_cast<float>(e.x));
@@ -396,6 +397,10 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
 
 void TimelineComponent::mouseUp(const juce::MouseEvent& e)
 {
+    if (draggingPlayhead_)
+    {
+        draggingPlayhead_ = false;
+    }
     juce::ignoreUnused(e);
 
     isPanningTimeline_ = false;
@@ -407,12 +412,22 @@ void TimelineComponent::mouseUp(const juce::MouseEvent& e)
 
 void TimelineComponent::mouseDown(const juce::MouseEvent& e)
 {
-    if (e.y < kRulerHeight)
+     int playheadX = (int) timeToX(currentTime_);
+    if (std::abs(e.x - playheadX) < kPlayheadHitWidth){
+        draggingPlayhead_ = true;
+        return;
+    }
+    if (e.y <= kRulerHeight)
     {
-        isPanningTimeline_ = false;
-        isUserPanning_ = false;
-        selectedBlock_ = -1;
-        dragMode_ = DragMode::None;
+        double newTime = xToTime(e.x);
+        newTime = juce::jmax(0.0, newTime);
+
+        currentTime_ = newTime;
+
+        if (onPlayheadMoved)
+            onPlayheadMoved(newTime);
+
+        repaint();
         return;
     }
 
@@ -471,23 +486,22 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& e)
     }
 }
 
-void TimelineComponent::setCurrentTime(double time)
+void TimelineComponent::setCurrentTime(double timeSec)
 {
-    currentTime_ = time;
-
-    if (isPlaying_ && followPlayhead_ && !isUserPanning_)
+    currentTime_ = juce::jmax(0.0, timeSec);
+    if (isPlaying_)
     {
-        const double anchorTime = playheadAnchorX_ / pixelsPerSecond_;
+        float x = timeToX(currentTime_);
 
-        if (currentTime_ <= anchorTime)
-            viewStartTime_ = 0.0;
-        else
-            viewStartTime_ = currentTime_ - anchorTime;
+        if (x > playheadAnchorX_)
+        {
+            viewStartTime_ = currentTime_ - (playheadAnchorX_ / pixelsPerSecond_);
+            viewStartTime_ = juce::jmax(0.0, viewStartTime_);
+        }
     }
 
     repaint();
 }
-
 
 void TimelineComponent::enableFollowPlayhead()
 {

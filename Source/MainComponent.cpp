@@ -100,6 +100,10 @@ MainComponent::MainComponent()
             sidebar.showBlockInfo(*block);
 
     };
+    transportBar.onPlayheadMoved = [this](double newTimeSec)
+    {
+        view.seekTransportClock(newTimeSec);
+    };
     sidebar.onApplyBlockInfo = [this](int serial, Vec3i pos, double start, double duration, bool movementEnabled)
     {
         view.applySidebarBlockInfo(serial, pos, start, duration, movementEnabled);
