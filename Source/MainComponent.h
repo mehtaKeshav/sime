@@ -59,7 +59,7 @@ private:
     void syncComboToActive();
 
     // ── File menu (DAW-style) ────────────────────────────────────────────────
-    juce::TextButton fileMenuBtn_ { "File" };
+    juce::TextButton fileMenuBtn_;
 
     juce::String currentFilePath_;
     std::unique_ptr<juce::FileChooser> fileChooser_;

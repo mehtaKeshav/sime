@@ -88,15 +88,20 @@ TransportBarComponent::TransportBarComponent()
     };
 
     // ── Collapse button ───────────────────────────────────────────────────────
+    // ▲ = \xe2\x96\xb2  (U+25B2)   ▼ = \xe2\x96\xbc  (U+25BC)
     collapseButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff25283a));
     collapseButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    collapseButton.setButtonText(isCollapsed_ ? "^" : "v");
+    collapseButton.setButtonText(isCollapsed_
+        ? juce::CharPointer_UTF8("\xe2\x96\xb2")
+        : juce::CharPointer_UTF8("\xe2\x96\xbc"));
 
     collapseButton.onClick = [this]
     {
         isCollapsed_ = !isCollapsed_;
 
-        collapseButton.setButtonText(isCollapsed_ ? "^" : "v");
+        collapseButton.setButtonText(isCollapsed_
+            ? juce::CharPointer_UTF8("\xe2\x96\xb2")
+            : juce::CharPointer_UTF8("\xe2\x96\xbc"));
         timeline.setVisible(!isCollapsed_);
 
         if (onHeightChanged)

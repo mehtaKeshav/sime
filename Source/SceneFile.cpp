@@ -115,6 +115,25 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
 
         if (!readVal<int32_t>(f, b.soundId)) return false;
 
+        // --- v3: colour stored here — immediately after soundId (matches save order) ---
+        // NOTE: v1/v2 files did not have this field; derive colour from block type instead.
+        if (version >= 3)
+        {
+            int32_t r = 0, g = 0, bl = 0;
+            if (!readVal<int32_t>(f, r))  return false;
+            if (!readVal<int32_t>(f, g))  return false;
+            if (!readVal<int32_t>(f, bl)) return false;
+            b.colour = Vec3f {
+                juce::jlimit(0.0f, 1.0f, r / 255.0f),
+                juce::jlimit(0.0f, 1.0f, g / 255.0f),
+                juce::jlimit(0.0f, 1.0f, bl / 255.0f)
+            };
+        }
+        else
+        {
+            b.colour = b.getBlockColor(b.blockType, b.soundId);
+        }
+
         uint16_t pathLen = 0;
         if (!readVal(f, pathLen)) return false;
         if (pathLen > 0)
@@ -151,7 +170,7 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
             }
         }
 
-        // --- v2 additions (only present in v >= 2 files) ---
+        // --- v2 additions (isLooping + loopDurationSec, not present in v1) ---
         if (version >= 2)
         {
             uint8_t lp = 0;
@@ -162,27 +181,8 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
         }
         else
         {
-            // v1 default
             b.isLooping       = false;
             b.loopDurationSec = 4.0;
-        }
-        if (version >= 3)
-        {
-            int32_t r = 0, g = 0, bl = 0;
-
-            if (!readVal<int32_t>(f, r))  return false;
-            if (!readVal<int32_t>(f, g))  return false;
-            if (!readVal<int32_t>(f, bl)) return false;
-
-            b.colour = Vec3f {
-                juce::jlimit(0.0f, 1.0f, r / 255.0f),
-                juce::jlimit(0.0f, 1.0f, g / 255.0f),
-                juce::jlimit(0.0f, 1.0f, bl / 255.0f)
-            };
-        }
-        else
-        {
-            b.colour = b.getBlockColor(b.blockType, b.soundId); // fallback for old files
         }
 
         b.resetPlaybackState();

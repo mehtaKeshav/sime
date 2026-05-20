@@ -70,7 +70,12 @@ public:
                        juce::Point<int>)> onRequestBlockEdit;
 
     std::function<void(int serial)> onBlockSelected;
-    
+
+    /// Fired on the message thread whenever blocks are added, removed, loaded,
+    /// or cleared.  MainComponent uses this to update the transport bar without
+    /// waiting for the next 30 Hz timer tick.
+    std::function<void()> onBlockListChanged;
+
     void updateBlockTiming(int serial, double startTime, double duration);
 
     /// Apply edited values back to the block.
@@ -132,38 +137,20 @@ public:
         }
     }
 
-    /// Called by MainComponent when movement recording is confirmed
+    /// Called by MainComponent when movement recording is confirmed.
+    /// Queues the update for the GL thread — safe to call from message thread.
     void confirmMovementRecording(int serial, double duration)
     {
-        for (auto& b : blockList)
-        {
-            if (b.serial == serial)
-            {
-                b.durationSec = duration;
-                b.durationLocked = true;
-                b.hasRecordedMovement = true;
-                b.isRecordingMovement = false;
-                DBG("Movement recording confirmed for block " << serial 
-                    << " with " << b.recordedMovement.size() << " keyframes");
-                break;
-            }
-        }
-        recordingBlockSerial = -1;
+        juce::ScopedLock lock(movementOpMutex_);
+        pendingMovementOp_ = { PendingMovementOp::Confirm, serial, duration };
     }
 
-    /// Called when movement recording is cancelled
+    /// Called when movement recording is cancelled.
+    /// Queues the update for the GL thread — safe to call from message thread.
     void cancelMovementRecording(int serial)
     {
-        for (auto& b : blockList)
-        {
-            if (b.serial == serial)
-            {
-                b.recordedMovement.clear();
-                b.isRecordingMovement = false;
-                break;
-            }
-        }
-        recordingBlockSerial = -1;
+        juce::ScopedLock lock(movementOpMutex_);
+        pendingMovementOp_ = { PendingMovementOp::Cancel, serial, 0.0 };
     }
  
     /// Clear the selected block highlight (called when popup is cancelled)
@@ -182,8 +169,9 @@ public:
 
     double getTransportDuration() const noexcept
     {
+        juce::ScopedLock lock(blockListSnapshotMutex_);
         double maxEnd = 0.0;
-        for (const auto& b : blockList)
+        for (const auto& b : blockListSnapshot_)
             maxEnd = std::max(maxEnd, b.endTimeSec());
         return maxEnd;
     }
@@ -193,7 +181,7 @@ public:
     void transportStop()
     {
         transportClock.stop();
-        SequencerEngine::resetAllBlocks(blockList);
+        pendingStop_ = true;   // GL thread drains this and calls resetAllBlocks
     }
 
     /// Fast-forward / playback speed. 1.0 = real time. Routes to both the
@@ -213,9 +201,11 @@ public:
     // ── Scene persistence ─────────────────────────────────────────────────────
 
     /// Snapshot current blocks for saving (called from message thread).
+    /// Reads from blockListSnapshot_ which the GL thread refreshes each frame.
     std::vector<BlockEntry> getBlockListCopy() const
     {
-        return blockList;   // blockList is GL-thread-owned but we copy safely
+        juce::ScopedLock lock(blockListSnapshotMutex_);
+        return blockListSnapshot_;
     }
 
     /// Replace the entire scene with loaded blocks (called from message thread).
@@ -359,8 +349,11 @@ private:
     double lastRenderTime = 0.0;   ///< juce::Time::getMillisecondCounterHiRes() at last frame
 
     // Movement recording state
-    bool recordKeyHeld = false;
-    int recordingBlockSerial = -1;
+    // recordKeyHeld is written by the message thread (mouseDown/mouseUp/keyPressed)
+    // and read by the GL thread (renderOpenGL keyframe loop).  std::atomic ensures
+    // both threads see consistent values without a lock.
+    std::atomic<bool> recordKeyHeld { false };
+    int  recordingBlockSerial = -1;
     Vec3i dragStartPos;
     
 
@@ -430,8 +423,98 @@ private:
     // =========================================================================
     // Edit popup
     // =========================================================================
-    bool             editMode = false;     ///< Toggled by E key
+    bool             editMode = false;     ///< Toggled by Tab key
     int              selectedSerial = -1; ///< Serial of the block being edited
+
+    // =========================================================================
+    // Pending sidebar block-info edit  (message → GL thread)
+    // Replaces the old direct blockList mutation in applySidebarBlockInfo().
+    // =========================================================================
+    struct PendingSidebarEdit
+    {
+        int    serial          = -1;
+        Vec3i  pos;
+        double start           = 0.0;
+        double duration        = 1.0;
+        bool   movementEnabled = false;
+        bool   active          = false;
+    };
+    PendingSidebarEdit    pendingSidebarEdit_;
+    juce::CriticalSection sidebarEditMutex_;
+
+    // =========================================================================
+    // Pending timing-only update  (message → GL thread)
+    // Used by timeline drag (updateBlockTiming).
+    // =========================================================================
+    struct PendingTimingUpdate
+    {
+        int    serial   = -1;
+        double start    = 0.0;
+        double duration = 1.0;
+        bool   active   = false;
+    };
+    PendingTimingUpdate   pendingTimingUpdate_;
+    juce::CriticalSection timingMutex_;
+
+    // =========================================================================
+    // Pending movement confirm / cancel  (message → GL thread)
+    // =========================================================================
+    struct PendingMovementOp
+    {
+        enum Type { None, Confirm, Cancel } type = None;
+        int    serial   = -1;
+        double duration = 0.0;   ///< Used only for Confirm
+    };
+    PendingMovementOp     pendingMovementOp_;
+    juce::CriticalSection movementOpMutex_;
+
+    // =========================================================================
+    // Pending transport stop  (message → GL thread)
+    // transportClock.stop() is called directly (pre-existing); the blockList
+    // reset (SequencerEngine::resetAllBlocks) is deferred here so it runs
+    // safely on the GL thread.
+    // =========================================================================
+    std::atomic<bool> pendingStop_ { false };
+
+    // =========================================================================
+    // Pending edit-mode click  (message → GL thread)
+    // All edit-mode raycasts that need to read camera/voxelGrid/blockList are
+    // queued here and executed on the GL thread in renderOpenGL().
+    // =========================================================================
+    struct EditClickRequest
+    {
+        enum Type { None, EditRMB, SelectLMB, AltRecordLMB } type = None;
+        float x = 0.f, y = 0.f;
+        bool  active = false;
+    };
+    EditClickRequest      pendingEditClick_;
+    juce::CriticalSection editClickMutex_;
+
+    // =========================================================================
+    // Pending recording stop  (message → GL thread)
+    //
+    // mouseUp queues this instead of touching blockList directly.
+    // The GL thread reads keyframes, stops audio, and fires the confirm
+    // callback — all safely on the GL thread.
+    // =========================================================================
+    struct PendingRecordingStop
+    {
+        bool             active   = false;
+        juce::Point<int> mousePos;   ///< Captured on message thread for popup placement
+    };
+    PendingRecordingStop  pendingRecordingStop_;
+    juce::CriticalSection recordingStopMutex_;
+
+    // =========================================================================
+    // blockList snapshot  (GL thread writes, message thread reads)
+    //
+    // The GL thread copies blockList into this snapshot at the end of each
+    // renderOpenGL() frame.  All message-thread reads (getBlockListCopy,
+    // getTransportDuration, getBlockBySerial) use this snapshot, eliminating
+    // direct cross-thread access to blockList.
+    // =========================================================================
+    mutable std::vector<BlockEntry>  blockListSnapshot_;
+    mutable juce::CriticalSection    blockListSnapshotMutex_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ViewPortComponent)
 };

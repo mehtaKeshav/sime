@@ -55,6 +55,13 @@ MainComponent::MainComponent()
             sidebar.showBlockInfo(*block);
     };
 
+    // Update the transport bar immediately when blocks are added / removed / loaded,
+    // instead of waiting up to 33 ms for the next timerCallback tick.
+    view.onBlockListChanged = [this]()
+    {
+        transportBar.setBlocks(view.getBlockListCopy());
+    };
+
     
     sidebar.onCollapsedChanged = [this](bool isNowCollapsed)
     {
@@ -140,8 +147,11 @@ MainComponent::MainComponent()
 
     // ── File menu ───────────────────────────────────────────────────────────
     addChildComponent(fileMenuBtn_);
-    fileMenuBtn_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff1a1a2e));
-    fileMenuBtn_.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffccccdd));
+    fileMenuBtn_.setButtonText(juce::String("File ") + juce::String::fromUTF8("\xe2\x96\xbe")); // "File ▾"
+    fileMenuBtn_.setColour(juce::TextButton::buttonColourId,     juce::Colour(0xff252840));
+    fileMenuBtn_.setColour(juce::TextButton::buttonOnColourId,   juce::Colour(0xff3a3f60));
+    fileMenuBtn_.setColour(juce::TextButton::textColourOffId,    juce::Colour(0xffe2e6f2));
+    fileMenuBtn_.setColour(juce::TextButton::textColourOnId,     juce::Colours::white);
     fileMenuBtn_.onClick = [this] { showFileMenu(); };
 
     // ── Wire edit popup ───────────────────────────────────────────────────────
@@ -338,12 +348,12 @@ void MainComponent::showFileMenu()
 {
     juce::PopupMenu m;
     m.addItem(1, "New Scene");
-    m.addItem(2, "Open Scene…");
+    m.addItem(2, juce::String("Open Scene") + juce::String::fromUTF8("\xe2\x80\xa6"));  // Open Scene…
     m.addSeparator();
     m.addItem(3, "Save");
-    m.addItem(4, "Save As…");
+    m.addItem(4, juce::String("Save As") + juce::String::fromUTF8("\xe2\x80\xa6"));     // Save As…
     m.addSeparator();
-    m.addItem(5, "Export Audio…");
+    m.addItem(5, juce::String("Export Audio") + juce::String::fromUTF8("\xe2\x80\xa6")); // Export Audio…
 
     m.showMenuAsync(
         juce::PopupMenu::Options().withTargetComponent(&fileMenuBtn_),
@@ -472,7 +482,7 @@ void MainComponent::resized()
 
     blockTypeCombo.setBounds(tx, ty, 200, 26);
 
-    const int fbtnW = 56;
+    const int fbtnW = 72;
     fileMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW, ty, fbtnW, 26);
 
     // Viewport gets remaining area above transport bar
@@ -490,6 +500,7 @@ void MainComponent::resized()
 
 MainComponent::~MainComponent()
 {
+    stopTimer();   // prevent timerCallback from firing during teardown
     autoSave();
 }
 

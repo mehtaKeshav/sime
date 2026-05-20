@@ -41,7 +41,11 @@ SidebarComponent::SidebarComponent()
     };
     toggleButton.onClick = [this]()
     {
-        toggleButton.setButtonText(isCollapsed() ? "X" : "☰");
+        // ☰ = \xe2\x98\xb0  (U+2630 TRIGRAM FOR HEAVEN / hamburger)
+        // ✕ = \xe2\x9c\x95  (U+2715 MULTIPLICATION X)
+        toggleButton.setButtonText(isCollapsed()
+            ? juce::CharPointer_UTF8("\xe2\x98\xb0")
+            : juce::CharPointer_UTF8("\xe2\x9c\x95"));
         setCollapsed(!isCollapsed());
     };
     addAndMakeVisible(blockListButton);
@@ -522,8 +526,10 @@ void SidebarComponent::movementGraph(juce::Graphics& g,
     g.setColour(juce::Colours::grey);
     g.setFont(juce::Font("Public Sans", 9.0f, juce::Font::plain));
 
-    g.drawText("X " + juce::String(minX) + "→" + juce::String(maxX)
-             + "   Z " + juce::String(minZ) + "→" + juce::String(maxZ),
+    // U+2192 RIGHT ARROW = \xe2\x86\x92
+    const juce::String arrow = juce::String::fromUTF8("\xe2\x86\x92");
+    g.drawText("X " + juce::String(minX) + arrow + juce::String(maxX)
+             + "   Z " + juce::String(minZ) + arrow + juce::String(maxZ),
                graphArea.reduced(6).removeFromBottom(12),
                juce::Justification::centredLeft);
 }

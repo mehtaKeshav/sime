@@ -217,8 +217,14 @@ void ViewPortComponent::renderOpenGL()
         {
             if (sidebar != nullptr)
                 sidebar->setBlocks({});
+            if (onBlockListChanged)
+                onBlockListChanged();
         });
     }
+
+    // ── Pending transport stop (blockList reset deferred from message thread) ─
+    if (pendingStop_.exchange(false))
+        SequencerEngine::resetAllBlocks(blockList);
 
     // ── Load scene from file ────────────────────────────────────────────────
     if (pendingLoad_.exchange(false))
@@ -249,6 +255,8 @@ void ViewPortComponent::renderOpenGL()
         {
             if (sidebar != nullptr)
                 sidebar->setBlocks(uiBlocks);
+            if (onBlockListChanged)
+                onBlockListChanged();
         });
     }
 
@@ -290,6 +298,8 @@ void ViewPortComponent::renderOpenGL()
             {
                 if (sidebar != nullptr)
                     sidebar->setBlocks(uiBlocks);
+                if (onBlockListChanged)
+                    onBlockListChanged();
             });
         }
     }
@@ -338,7 +348,338 @@ void ViewPortComponent::renderOpenGL()
         }
     }
 
-    // ── Place ─────────────────────────────────────────────────────────────────
+    // ── Apply queued sidebar block-info edit ──────────────────────────────────
+    {
+        PendingSidebarEdit se;
+        {
+            juce::ScopedLock lock(sidebarEditMutex_);
+            se = pendingSidebarEdit_;
+            pendingSidebarEdit_.active = false;
+        }
+        if (se.active)
+        {
+            for (auto& b : blockList)
+            {
+                if (b.serial == se.serial)
+                {
+                    if (b.pos != se.pos)
+                    {
+                        if (voxelGrid.move(b.pos, se.pos))
+                        {
+                            b.pos = se.pos;
+                            renderer.meshDirty = true;
+                        }
+                        else
+                        {
+                            // Move failed — show alert on the message thread
+                            int failSerial = se.serial;
+                            juce::MessageManager::callAsync([failSerial]()
+                            {
+                                auto* dlg = new juce::AlertWindow(
+                                    "Unable to Move Block",
+                                    "Could not move block " + juce::String(failSerial)
+                                        + " — target position is occupied or out of bounds.",
+                                    juce::AlertWindow::WarningIcon);
+                                dlg->addButton("OK", 1);
+                                dlg->enterModalState(
+                                    true,
+                                    juce::ModalCallbackFunction::create([](int) {}),
+                                    true);
+                            });
+                        }
+                    }
+                    b.startTimeSec = se.start;
+                    b.durationSec  = se.duration;
+                    if (!se.movementEnabled)
+                        b.hasRecordedMovement = false;
+                    else if (!b.recordedMovement.empty())
+                        b.hasRecordedMovement = true;
+                    b.resetPlaybackState();
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── Apply queued timing-only update (from timeline drag) ──────────────────
+    {
+        PendingTimingUpdate tu;
+        {
+            juce::ScopedLock lock(timingMutex_);
+            tu = pendingTimingUpdate_;
+            pendingTimingUpdate_.active = false;
+        }
+        if (tu.active)
+        {
+            for (auto& b : blockList)
+            {
+                if (b.serial == tu.serial)
+                {
+                    b.startTimeSec = tu.start;
+                    b.durationSec  = tu.duration;
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── Apply queued movement confirm / cancel ────────────────────────────────
+    {
+        PendingMovementOp mo;
+        {
+            juce::ScopedLock lock(movementOpMutex_);
+            mo = pendingMovementOp_;
+            pendingMovementOp_.type = PendingMovementOp::None;
+        }
+        if (mo.type == PendingMovementOp::Confirm)
+        {
+            for (auto& b : blockList)
+            {
+                if (b.serial == mo.serial)
+                {
+                    b.durationSec         = mo.duration;
+                    b.durationLocked      = true;
+                    b.hasRecordedMovement = true;
+                    b.isRecordingMovement = false;
+                    DBG("Movement confirm applied on GL thread: block " << mo.serial
+                        << "  keyframes=" << (int)b.recordedMovement.size());
+                    break;
+                }
+            }
+            recordingBlockSerial = -1;
+        }
+        else if (mo.type == PendingMovementOp::Cancel)
+        {
+            for (auto& b : blockList)
+            {
+                if (b.serial == mo.serial)
+                {
+                    b.recordedMovement.clear();
+                    b.isRecordingMovement = false;
+                    break;
+                }
+            }
+            recordingBlockSerial = -1;
+        }
+    }
+
+    // ── Drain edit-mode click (Fix 3: edit raycasts now happen on GL thread) ──
+    //
+    // All three edit-mode mouse cases (RMB open-popup, LMB select, Alt+LMB
+    // start-recording) used to call Raycaster::cast() on the message thread,
+    // reading camera / voxelGrid state owned by the GL thread.  mouseDown()
+    // now queues an EditClickRequest and the raycast runs here instead.
+    {
+        EditClickRequest ec;
+        {
+            juce::ScopedLock lock(editClickMutex_);
+            ec = pendingEditClick_;
+            pendingEditClick_.active = false;
+        }
+        if (ec.active)
+        {
+            const int   ew = getWidth(), eh = getHeight();
+            const float eAspect = (eh > 0) ? (float)ew / eh : 1.f;
+            const Mat4  eMat  = camera.getViewMatrix();
+            const Mat4  eProj = camera.getProjectionMatrix(eAspect);
+            Vec3f eRay = Raycaster::screenToRay(ec.x, ec.y,
+                                                (float)ew, (float)eh, eMat, eProj);
+            RaycastResult eHit = Raycaster::cast(camera.getPosition(), eRay, voxelGrid);
+
+            if (ec.type == EditClickRequest::EditRMB)
+            {
+                if (eHit.hit)
+                {
+                    // Cancel the tentative camera drag we started on the message thread
+                    {
+                        juce::ScopedLock lk(mouseMutex);
+                        mouse.rightDown     = false;
+                        mouse.rightDragDist = 0.f;
+                    }
+                    for (const auto& b : blockList)
+                    {
+                        if (b.pos == eHit.voxelPos)
+                        {
+                            selectedSerial = b.serial;
+                            // Capture all block data needed for the popup callback
+                            struct ED { int serial; BlockType bt; double start, dur;
+                                        int sid; juce::String cfp; bool loop;
+                                        double loopDur; juce::Point<int> pos; };
+                            ED ed { b.serial, b.blockType, b.startTimeSec, b.durationSec,
+                                    b.soundId, juce::String(b.customFilePath),
+                                    b.isLooping, b.loopDurationSec,
+                                    { (int)ec.x, (int)ec.y } };
+                            if (onRequestBlockEdit)
+                            {
+                                juce::MessageManager::callAsync([this, ed]()
+                                {
+                                    if (onRequestBlockEdit)
+                                        onRequestBlockEdit(ed.serial, ed.bt,
+                                                           ed.start, ed.dur,
+                                                           ed.sid, ed.cfp,
+                                                           ed.loop, ed.loopDur,
+                                                           ed.pos);
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    // Missed — deselect; camera drag was already started
+                    selectedSerial = -1;
+                }
+            }
+            else if (ec.type == EditClickRequest::SelectLMB)
+            {
+                if (eHit.hit)
+                {
+                    for (auto& b : blockList)
+                    {
+                        if (b.pos == eHit.voxelPos)
+                        {
+                            selectedSerial = b.serial;
+                            dragStartPos   = b.pos;
+                            int ser = b.serial;
+                            if (onBlockSelected)
+                            {
+                                juce::MessageManager::callAsync([this, ser]()
+                                {
+                                    if (onBlockSelected) onBlockSelected(ser);
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    selectedSerial = -1;
+                }
+            }
+            else if (ec.type == EditClickRequest::AltRecordLMB)
+            {
+                if (eHit.hit)
+                {
+                    for (auto& b : blockList)
+                    {
+                        if (b.pos == eHit.voxelPos)
+                        {
+                            selectedSerial  = b.serial;
+                            dragStartPos    = b.pos;
+                            // recordKeyHeld is set by mouseDown (message thread) before
+                            // this click is queued, so it is already true here.
+                            moveDragPlaneY_ = b.pos.y;
+
+                            if (!b.isRecordingMovement)
+                            {
+                                b.isRecordingMovement = true;
+                                b.recordingStartTime  =
+                                    juce::Time::getMillisecondCounterHiRes() * 0.001;
+                                b.recordingStartPos   = b.pos;
+                                b.recordedMovement.clear();
+                                recordingBlockSerial  = b.serial;
+                                b.recordedMovement.push_back(
+                                    MovementKeyFrame{ 0.0, b.pos });
+                                DBG("Recording started on GL thread: block " << b.serial);
+
+                                if (b.soundId >= 0)
+                                {
+                                    SequencerEvent startEv;
+                                    startEv.type           = SequencerEventType::Start;
+                                    startEv.blockSerial    = b.serial;
+                                    startEv.soundId        = b.soundId;
+                                    startEv.triggerTimeSec = 0.0;
+                                    startEv.blockX = static_cast<float>(b.pos.x);
+                                    startEv.blockY = static_cast<float>(b.pos.y);
+                                    startEv.blockZ = static_cast<float>(b.pos.z);
+                                    audioEngine.processEvents({ startEv });
+                                }
+                                juce::MessageManager::callAsync([this]() { repaint(); });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Drain pending recording stop ──────────────────────────────────────────
+    // Placed AFTER pendingEditClick_ so that a fast click (AltRecordLMB start +
+    // immediate mouseUp stop queued in the same frame) always processes the start
+    // first.  All blockList / recordedMovement access is on the GL thread here.
+    {
+        PendingRecordingStop stopReq;
+        {
+            juce::ScopedLock lock(recordingStopMutex_);
+            stopReq = pendingRecordingStop_;
+            pendingRecordingStop_.active = false;
+        }
+
+        if (stopReq.active && recordingBlockSerial >= 0)
+        {
+            for (auto& b : blockList)
+            {
+                if (b.serial == recordingBlockSerial)
+                {
+                    double recordedDuration =
+                        juce::Time::getMillisecondCounterHiRes() * 0.001
+                        - b.recordingStartTime;
+
+                    DBG("Recording stop processed on GL thread.  serial=" << b.serial
+                        << "  keyframes=" << (int)b.recordedMovement.size()
+                        << "  duration=" << recordedDuration);
+
+                    // Stop the preview sound (audioEngine is GL-thread-safe here)
+                    if (b.soundId >= 0)
+                    {
+                        SequencerEvent stopEv;
+                        stopEv.type        = SequencerEventType::Stop;
+                        stopEv.blockSerial = b.serial;
+                        stopEv.soundId     = b.soundId;
+                        audioEngine.processEvents({ stopEv });
+                    }
+
+                    if (b.recordedMovement.size() > 1)
+                    {
+                        b.isRecordingMovement = false;
+
+                        // Copy keyframes by value so the message thread gets its
+                        // own independent copy — no shared reference to blockList.
+                        int     captSerial   = b.serial;
+                        double  captDuration = recordedDuration;
+                        auto    captKeyframes= b.recordedMovement;   // copy
+                        auto    captPos      = stopReq.mousePos;
+
+                        if (onRequestMovementConfirm)
+                        {
+                            juce::MessageManager::callAsync(
+                                [this,
+                                 captSerial, captDuration,
+                                 kf  = std::move(captKeyframes),
+                                 pos = captPos]() mutable
+                                {
+                                    if (onRequestMovementConfirm)
+                                        onRequestMovementConfirm(captSerial, captDuration,
+                                                                  kf, pos);
+                                });
+                        }
+                    }
+                    else
+                    {
+                        // Too few keyframes — cancel silently
+                        b.recordedMovement.clear();
+                        b.isRecordingMovement = false;
+                        recordingBlockSerial  = -1;
+                        DBG("Recording cancelled — insufficient movement");
+                    }
+                    break;
+                }
+            }
+        }
+    }
     if (placeReq.active)
     {
         const int   w = getWidth(), h = getHeight();
@@ -441,6 +782,8 @@ void ViewPortComponent::renderOpenGL()
             {
                 if(sidebar != nullptr)
                     sidebar->setBlocks(uiBlocks);
+                if (onBlockListChanged)
+                    onBlockListChanged();
             });
         }
     }
@@ -472,6 +815,8 @@ void ViewPortComponent::renderOpenGL()
             {
                 if (sidebar != nullptr)
                     sidebar->setBlocks(uiBlocks);
+                if (onBlockListChanged)
+                    onBlockListChanged();
             });
         }
     }
@@ -807,6 +1152,14 @@ void ViewPortComponent::renderOpenGL()
         juce::ScopedLock lock(hud.lock);
         hud.text = info;
     }
+
+    // ── Refresh blockList snapshot for safe message-thread reads ─────────────
+    // Done last, after all blockList mutations, so the snapshot is always
+    // consistent with what was rendered this frame.
+    {
+        juce::ScopedLock lock(blockListSnapshotMutex_);
+        blockListSnapshot_ = blockList;
+    }
   
     
 }
@@ -1063,45 +1416,27 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
     }
 
     
-    // ── Edit mode: right-click on existing block ───────────────────────────────
+    // ── Edit mode: RMB — queue GL-thread raycast to find block for edit popup ──
+    // Previously: did Raycaster::cast() here, reading camera/voxelGrid owned by GL thread.
+    // Fix: queue the screen position; GL thread does the raycast in renderOpenGL().
     if (editMode && e.mods.isRightButtonDown())
     {
-        const int   w = getWidth(), h = getHeight();
-        const float aspect = (h > 0) ? (float)w / h : 1.f;
-        const Mat4  view_  = camera.getViewMatrix();
-        const Mat4  proj   = camera.getProjectionMatrix(aspect);
-        Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
-                                              (float)w, (float)h, view_, proj);
-        RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
- 
-        if (hit.hit)
         {
-            for (const auto& b : blockList)
-            {
-                if (b.pos == hit.voxelPos)
-                {
-                    selectedSerial = b.serial;
-
-                    if (onRequestBlockEdit)
-                        onRequestBlockEdit(b.serial,
-                                           b.blockType,
-                                           b.startTimeSec,
-                                           b.durationSec,
-                                           b.soundId,
-                                           juce::String(b.customFilePath),
-                                           b.isLooping,
-                                           b.loopDurationSec,
-                                           e.getPosition());
-                    return;
-                }
-            }
+            juce::ScopedLock lock(editClickMutex_);
+            pendingEditClick_ = { EditClickRequest::EditRMB,
+                                  e.position.x, e.position.y, true };
         }
- 
-        // Clicked empty space — deselect and fall through to start camera drag
-        selectedSerial = -1;
+        // Tentatively start camera drag — GL thread cancels it if a block is hit.
+        {
+            juce::ScopedLock lock(mouseMutex);
+            mouse.rightDown     = true;
+            mouse.rightDragDist = 0.f;
+            mouse.rightDownPos  = e.position;
+        }
+        return;
     }
 
-    // ── RMB: start look drag ──────────────────────────────────────────────────
+    // ── RMB (normal mode): start look drag ────────────────────────────────────
     if (e.mods.isRightButtonDown())
     {
         juce::ScopedLock lock(mouseMutex);
@@ -1111,194 +1446,90 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
-    // ── LMB: queue place request on the GL thread ─────────────────────────────
-    // Storing the pixel position + shift state and letting the GL thread do the
-    // raycast avoids the camera race-condition that caused missed placements.
+    // ── LMB ──────────────────────────────────────────────────────────────────
     if (e.mods.isLeftButtonDown())
     {
-        const int   w = getWidth(), h = getHeight();
-        const float aspect = (h > 0) ? (float)w / h : 1.f;
-        const Mat4  view_  = camera.getViewMatrix();
-        const Mat4  proj   = camera.getProjectionMatrix(aspect);
-        Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
-                                              (float)w, (float)h, view_, proj);
-        RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
-
-        if(hit.hit){
-            for (const auto& b : blockList)
-            {
-                if (b.pos == hit.voxelPos)
-                {
-                    if (onBlockSelected)
-                        onBlockSelected(b.serial);
-                }
-            }
-
-        }else{
-            juce::ScopedLock lock(clickMutex);
-            pendingPlace = { true, e.position.x, e.position.y, e.mods.isShiftDown() };
-        }
-    }
-
-
-
-    // ── Edit mode + Alt: LEFT-click to select and start recording ────────────
-    if (editMode && e.mods.isLeftButtonDown() && e.mods.isAltDown())
-    {
-        DBG("Alt+Left click - selecting block for recording");
-        
-        const int   w = getWidth(), h = getHeight();
-        const float aspect = (h > 0) ? (float)w / h : 1.f;
-        const Mat4  view_  = camera.getViewMatrix();
-        const Mat4  proj   = camera.getProjectionMatrix(aspect);
-        Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
-                                              (float)w, (float)h, view_, proj);
-        RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
- 
-        if (hit.hit)
+        if (editMode && e.mods.isAltDown())
         {
-            DBG("Alt+LMB hit voxel at (" << hit.voxelPos.x << "," << hit.voxelPos.y << "," << hit.voxelPos.z << ")");
-            
-            for (auto& b : blockList)
-            {
-                if (b.pos == hit.voxelPos)
-                {
-                    selectedSerial = b.serial;
-                    dragStartPos   = b.pos;
-                    recordKeyHeld  = true;
-                    moveDragPlaneY_ = b.pos.y;   // lock Y plane for axis-constrained drag
+            // Set the flag NOW on the message thread, before queuing the GL
+            // raycast.  This guarantees mouseUp sees recordKeyHeld == true even
+            // if it fires before the GL thread processes the AltRecordLMB click
+            // (fast-click / single-frame race).
+            recordKeyHeld.store(true);
 
-                    if (!b.isRecordingMovement)
+            // Queue GL-thread raycast — previously read camera/blockList on message thread.
+            juce::ScopedLock lock(editClickMutex_);
+            pendingEditClick_ = { EditClickRequest::AltRecordLMB,
+                                  e.position.x, e.position.y, true };
+            return;  // never place a block in this mode
+        }
+
+        if (editMode)
+        {
+            // LMB in edit mode (no Alt): select a block.
+            // Queue GL-thread raycast — previously read camera/blockList on message thread.
+            juce::ScopedLock lock(editClickMutex_);
+            pendingEditClick_ = { EditClickRequest::SelectLMB,
+                                  e.position.x, e.position.y, true };
+            return;  // never place a block in edit mode
+        }
+
+        // Normal mode LMB: notify sidebar of block click, or queue placement.
+        // The message-thread raycast here is a pre-existing minor race (read-only
+        // on voxelGrid + blockList snapshot); acceptable until a larger refactor.
+        {
+            const int   w = getWidth(), h = getHeight();
+            const float aspect = (h > 0) ? (float)w / h : 1.f;
+            const Mat4  view_  = camera.getViewMatrix();
+            const Mat4  proj   = camera.getProjectionMatrix(aspect);
+            Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
+                                                  (float)w, (float)h, view_, proj);
+            RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
+
+            if (hit.hit)
+            {
+                for (const auto& b : blockList)
+                {
+                    if (b.pos == hit.voxelPos)
                     {
-                        // ── Start recording ───────────────────────────────────
-                        b.isRecordingMovement = true;
-                        b.recordingStartTime  = juce::Time::getMillisecondCounterHiRes() * 0.001;
-                        b.recordingStartPos   = b.pos;
-                        b.recordedMovement.clear();
-                        recordingBlockSerial  = b.serial;
-
-                        // Initial keyframe at t=0
-                        b.recordedMovement.push_back(MovementKeyFrame{ 0.0, b.pos });
-                        DBG("Started recording movement for block " << b.serial);
-
-                        // Trigger a repaint so the REC indicator appears right away
-                        juce::MessageManager::callAsync([this]() { repaint(); });
-
-                        // ── Play preview sound so user can hear the block ─────
-                        if (b.soundId >= 0)
-                        {
-                            SequencerEvent startEv;
-                            startEv.type           = SequencerEventType::Start;
-                            startEv.blockSerial    = b.serial;
-                            startEv.soundId        = b.soundId;
-                            startEv.triggerTimeSec = 0.0;
-                            startEv.blockX         = static_cast<float>(b.pos.x);
-                            startEv.blockY         = static_cast<float>(b.pos.y);
-                            startEv.blockZ         = static_cast<float>(b.pos.z);
-                            audioEngine.processEvents({ startEv });
-                        }
+                        if (onBlockSelected)
+                            onBlockSelected(b.serial);
                     }
-                    return;
                 }
             }
-        }
-        
-        return;  // Don't do normal placement while Alt is held
-    }
-
-
-     if (editMode && e.mods.isLeftButtonDown() && !e.mods.isAltDown())
-    {
-        // ... existing selection code without recording ...
-        const int   w = getWidth(), h = getHeight();
-        const float aspect = (h > 0) ? (float)w / h : 1.f;
-        const Mat4  view_  = camera.getViewMatrix();
-        const Mat4  proj   = camera.getProjectionMatrix(aspect);
-        Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
-                                              (float)w, (float)h, view_, proj);
-        RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
- 
-        if (hit.hit)
-        {
-            for (auto& b : blockList)
+            else
             {
-                if (b.pos == hit.voxelPos)
-                {
-                    selectedSerial = b.serial;
-                    dragStartPos = b.pos;
-                    DBG("Block " << b.serial << " selected (no recording)");
-                    return;
-                }
+                juce::ScopedLock lock(clickMutex);
+                pendingPlace = { true, e.position.x, e.position.y,
+                                 e.mods.isShiftDown() };
             }
         }
-        
-        selectedSerial = -1;
-        return;
     }
 }
 
 void ViewPortComponent::mouseUp(const juce::MouseEvent& e)
 {
-    
     // ── Stop recording if Alt+drag was happening ──────────────────────────────
-    if (recordKeyHeld)
+    // recordKeyHeld is set by mouseDown (message thread) so it is always visible
+    // here, even on a fast click before the GL thread processed the start.
+    if (recordKeyHeld.load())
     {
-        recordKeyHeld = false;
-        
-        if (recordingBlockSerial >= 0)
-        {
-            for (auto& b : blockList)
-            {
-                if (b.serial == recordingBlockSerial)
-                {
-                    double recordedDuration = (juce::Time::getMillisecondCounterHiRes() * 0.001) 
-                                             - b.recordingStartTime;
-                    
-                    DBG("Recording ended. Duration: " << recordedDuration 
-                        << ", Keyframes: " << b.recordedMovement.size());
-                    
-                    // Stop the preview sound that was playing during recording
-                    {
-                        SequencerEvent stopEv;
-                        stopEv.type        = SequencerEventType::Stop;
-                        stopEv.blockSerial = b.serial;
-                        stopEv.soundId     = b.soundId;
-                        audioEngine.processEvents({ stopEv });
-                    }
+        recordKeyHeld.store(false);
 
-                    if (b.recordedMovement.size() > 1)  // Need at least 2 keyframes
-                    {
-                        b.isRecordingMovement = false;
-                        
-                        // Show confirmation popup
-                        if (onRequestMovementConfirm)
-                        {
-                            auto mousePos = getMouseXYRelative();
-                            onRequestMovementConfirm(b.serial, recordedDuration, b.recordedMovement, mousePos);
-                        }
-                    }
-                    else
-                    {
-                        // Not enough movement, cancel
-                        b.recordedMovement.clear();
-                        b.isRecordingMovement = false;
-                        recordingBlockSerial = -1;
-                        DBG("Recording cancelled - insufficient movement");
-                    }
-                    break;
-                }
-            }
+        // Queue the stop for the GL thread.  The GL thread owns blockList and
+        // recordedMovement — it will read keyframe count, copy keyframes by
+        // value, stop preview audio, and fire the confirmation callback.
+        // mouseUp must NOT touch blockList directly.
+        {
+            juce::ScopedLock lock(recordingStopMutex_);
+            pendingRecordingStop_ = { true, getMouseXYRelative() };
         }
 
-        // Bug 1 fix: always restore cursor, regardless of whether recording succeeded.
-        // The early return below would bypass the wasRight cursor-restore block.
         {
             juce::ScopedLock lock(mouseMutex);
             mouse.rightDown = false;
         }
         setMouseCursor(juce::MouseCursor::NormalCursor);
-
-        // Clear the REC indicator on the message thread
         juce::MessageManager::callAsync([this]() { repaint(); });
         return;
     }
@@ -1577,15 +1808,9 @@ bool ViewPortComponent::keyPressed(const juce::KeyPress& k)
 
 void ViewPortComponent::updateBlockTiming(int serial, double start, double duration)
 {
-    for (auto& b : blockList)
-    {
-        if (b.serial == serial)
-        {
-            b.startTimeSec = start;
-            b.durationSec = duration;
-            break;
-        }
-    }
+    // Queue for the GL thread — safe to call from the message thread.
+    juce::ScopedLock lock(timingMutex_);
+    pendingTimingUpdate_ = { serial, start, duration, true };
 }
 
 void ViewPortComponent::focusGained(FocusChangeType) {}
@@ -1599,7 +1824,8 @@ void ViewPortComponent::highlightBlock(int serial)
 
 std::optional<BlockEntry> ViewPortComponent::getBlockBySerial(int serial) const
 {
-    for (const auto& b : blockList)
+    juce::ScopedLock lock(blockListSnapshotMutex_);
+    for (const auto& b : blockListSnapshot_)
         if (b.serial == serial)
             return b;
 
@@ -1614,38 +1840,11 @@ void ViewPortComponent::applySidebarBlockInfo(
     double duration,
     bool movementEnabled)
 {
-    for (auto& b : blockList)
-    {
-        if (b.serial == serial)
-        {
-            if(b.pos != pos){
-                if (voxelGrid.move(b.pos, pos))
-                    b.pos = pos;
-                else{
-                     auto* dialog = new juce::AlertWindow("Unable to Move Block",
-                                             "Failed to move block " + juce::String(serial) + " to new position." ,
-                                             juce::AlertWindow::WarningIcon);
-                    dialog->addButton("Ok",  1);
-                    dialog->enterModalState(true,
-                            juce::ModalCallbackFunction::create([](int result)
-                            {
-                                juce::ignoreUnused(result);
-                            }),
-                            true);
-                }
-            }
-            b.startTimeSec = start;
-            b.durationSec = duration;
-
-            if (!movementEnabled)
-                b.hasRecordedMovement = false;
-            else if (!b.recordedMovement.empty())
-                b.hasRecordedMovement = true;
-
-            b.resetPlaybackState();
-            break;
-        }
-    }
+    // Queue for the GL thread — safe to call from the message thread.
+    // The GL thread drains pendingSidebarEdit_ in renderOpenGL() and does
+    // the voxelGrid.move() + blockList mutation there.
+    juce::ScopedLock lock(sidebarEditMutex_);
+    pendingSidebarEdit_ = { serial, pos, start, duration, movementEnabled, true };
 }
 
 bool ViewPortComponent::exportSceneAudioToFile(const juce::File& outputFile,

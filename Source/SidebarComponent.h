@@ -18,7 +18,9 @@ public:
     ~SidebarComponent() override;
 
     void paint(juce::Graphics&) override;
-    juce::TextButton toggleButton { "X" };
+    // Initial state: sidebar is expanded, so show the close (✕) symbol.
+    // Text is updated dynamically in onClick via CharPointer_UTF8.
+    juce::TextButton toggleButton { juce::CharPointer_UTF8("\xe2\x9c\x95") };
     juce::TextButton blockListButton { "Blocks" };
     juce::TextButton infoButton { "Info" };
     void resized() override;
