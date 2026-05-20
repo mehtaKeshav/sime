@@ -280,6 +280,8 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
     const int numSamples     = bufferToFill.numSamples;
     const int startSample    = bufferToFill.startSample;
 
+    const float rate = playbackRate_.load();
+
     for (auto& voice : activeVoices_)
     {
         if (voice.buffer == nullptr) continue;
@@ -289,6 +291,8 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
         auto* outR = (outputChannels > 1)
                      ? outputBuffer->getWritePointer(1, startSample)
                      : nullptr;
+
+        const float step = voice.pitchRate * rate;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -300,7 +304,7 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
             outL[i] += sample * voice.leftGain;
             if (outR) outR[i] += sample * voice.rightGain;
 
-            voice.samplePositionF += voice.pitchRate;
+            voice.samplePositionF += step;
         }
     }
 

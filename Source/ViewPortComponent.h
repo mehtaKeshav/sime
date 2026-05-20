@@ -195,6 +195,17 @@ public:
         transportClock.stop();
         SequencerEngine::resetAllBlocks(blockList);
     }
+
+    /// Fast-forward / playback speed. 1.0 = real time. Routes to both the
+    /// transport clock (so the sequencer schedules events faster) and the
+    /// audio engine (so in-flight voices and new voices play faster).
+    void setPlaybackRate(double rate)
+    {
+        transportClock.setPlaybackRate(rate);
+        audioEngine.setPlaybackRate(rate);
+    }
+
+    double getPlaybackRate() const noexcept { return transportClock.playbackRate(); }
     std::function<void(int serial, double duration, 
                     const std::vector<MovementKeyFrame>& keyframes,
                     juce::Point<int>)> onRequestMovementConfirm;

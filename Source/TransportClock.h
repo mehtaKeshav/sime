@@ -64,6 +64,13 @@ public:
     // -----------------------------------------------------------------------
     void seekTo(double timeSec) noexcept;
 
+    // -----------------------------------------------------------------------
+    // Playback rate (1.0 = real time, 2.0 = double-speed fast forward, etc.)
+    // Clamped to a sensible range to avoid negative or zero rates.
+    // -----------------------------------------------------------------------
+    void   setPlaybackRate(double rate) noexcept;
+    double playbackRate() const noexcept { return playbackRate_; }
+
 private:
     double currentTime_ = 0.0;
     bool   playing_     = false;
@@ -72,4 +79,6 @@ private:
     // Loop settings
     bool   looping_     = false;
     double loopEnd_     = 0.0;   ///< Loop wraps when currentTime_ >= loopEnd_
+
+    double playbackRate_ = 1.0;
 };

@@ -6,6 +6,7 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <memory>
@@ -126,6 +127,15 @@ public:
         return sampleLibrary_;
     }
 
+    /// Tape-speed fast forward. 1.0 = normal, 2.0 = double speed, etc.
+    /// Safe to call from any thread (the audio callback reads atomically).
+    void setPlaybackRate(double rate) noexcept
+    {
+        playbackRate_.store(static_cast<float>(juce::jlimit(0.25, 8.0, rate)));
+    }
+
+    double getPlaybackRate() const noexcept { return playbackRate_.load(); }
+
 private:
     // ---- Sample library -------------------------------------------------
     std::unordered_map<int, juce::AudioBuffer<float>> sampleLibrary_;
@@ -153,6 +163,8 @@ private:
 
     double sampleRate_    = 44100.0;
     int    blockSize_     = 512;
+
+    std::atomic<float> playbackRate_ { 1.0f };
 
     // ---- Internal helpers (called from audio thread) --------------------
     void dispatchEvent   (const SequencerEvent& ev);

@@ -104,6 +104,10 @@ MainComponent::MainComponent()
     {
         view.seekTransportClock(newTimeSec);
     };
+    transportBar.onSpeedChanged = [this](double rate)
+    {
+        view.setPlaybackRate(rate);
+    };
     sidebar.onApplyBlockInfo = [this](int serial, Vec3i pos, double start, double duration, bool movementEnabled)
     {
         view.applySidebarBlockInfo(serial, pos, start, duration, movementEnabled);

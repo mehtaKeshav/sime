@@ -47,6 +47,7 @@ public:
     std::function<void(int serial)> onTimelineBlockClicked;
     std::function<void(double)> onBpmChanged;
     std::function<void(double newTimeSec)> onPlayheadMoved;
+    std::function<void(double rate)> onSpeedChanged;
 
     
 
@@ -57,7 +58,11 @@ private:
     // ── Buttons ───────────────────────────────────────────────────────────────
     juce::TextButton playPauseButton;
     juce::TextButton stopButton;
+    juce::TextButton speedButton_  { "1x" };
     juce::TextButton collapseButton { "⌄" };
+
+    int    speedIndex_ = 0;                         ///< index into kSpeedRates
+    static constexpr double kSpeedRates[3] = { 1.0, 2.0, 3.0 };
     juce::Label timeLabel;
     TimelineComponent timeline;
     juce::Rectangle<int> miniProgressBounds_;

@@ -31,7 +31,7 @@ void TransportClock::update(double deltaTimeSec) noexcept
 {
     if (!playing_) return;
 
-    currentTime_ += deltaTimeSec;
+    currentTime_ += deltaTimeSec * playbackRate_;
 
     if (looping_ && loopEnd_ > 0.0 && currentTime_ >= loopEnd_)
     {
@@ -39,6 +39,12 @@ void TransportClock::update(double deltaTimeSec) noexcept
         const double overshoot = currentTime_ - loopEnd_;
         currentTime_ = overshoot;   // loops back to 0 + overshoot
     }
+}
+
+// ---------------------------------------------------------------------------
+void TransportClock::setPlaybackRate(double rate) noexcept
+{
+    playbackRate_ = std::clamp(rate, 0.25, 8.0);
 }
 
 // ---------------------------------------------------------------------------

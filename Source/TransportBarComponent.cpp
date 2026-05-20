@@ -7,6 +7,7 @@ TransportBarComponent::TransportBarComponent()
 {
     addAndMakeVisible(playPauseButton);
     addAndMakeVisible(stopButton);
+    addAndMakeVisible(speedButton_);
     addAndMakeVisible(timeLabel);
     addAndMakeVisible(timeline);
     addAndMakeVisible(collapseButton);
@@ -43,6 +44,23 @@ TransportBarComponent::TransportBarComponent()
     {
         if (onStop)
             onStop();
+    };
+
+    // ── Speed button (cycles 1x → 2x → 3x → 1x) ──────────────────────────────
+    speedButton_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff333344));
+    speedButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    speedButton_.setTooltip("Playback speed");
+
+    speedButton_.onClick = [this]
+    {
+        constexpr int n = (int) (sizeof(kSpeedRates) / sizeof(kSpeedRates[0]));
+        speedIndex_ = (speedIndex_ + 1) % n;
+
+        const double rate = kSpeedRates[speedIndex_];
+        speedButton_.setButtonText(juce::String((int) rate) + "x");
+
+        if (onSpeedChanged)
+            onSpeedChanged(rate);
     };
 
     // ── Time label ────────────────────────────────────────────────────────────
@@ -274,6 +292,7 @@ void TransportBarComponent::resized()
 
     playPauseButton.setBounds(controlStrip.removeFromLeft(65).reduced(6, 5));
     stopButton.setBounds(controlStrip.removeFromLeft(65).reduced(6, 5));
+    speedButton_.setBounds(controlStrip.removeFromLeft(55).reduced(6, 5));
 
     timeLabel.setBounds(controlStrip.removeFromLeft(170).reduced(6, 5));
 
