@@ -78,6 +78,9 @@ public:
 
     void updateBlockTiming(int serial, double startTime, double duration);
 
+    /// Queue an undo of the last block placement. Safe to call from the message thread.
+    void requestUndo() { pendingUndo_.store(true); }
+
     /// Apply edited values back to the block.
     /// Safe to call from the message thread — queues the edit for the GL thread.
     ///
@@ -364,8 +367,12 @@ private:
     {
         juce::String     text;
         juce::Point<int> pos { 8, 3 };
-        bool             isRecording = false;  ///< True while movement recording is active
-        bool             isEditMode  = false;  ///< True while edit mode is active
+        bool             isRecording = false;
+        bool             isEditMode  = false;
+        bool             isShiftMode = false;
+        int              shiftY      = 0;
+        int              voxelCount  = 0;
+        Vec3i            cursorPos   { 0, 0, 0 };
         juce::CriticalSection lock;
     } hud;
 
@@ -515,6 +522,10 @@ private:
     // =========================================================================
     mutable std::vector<BlockEntry>  blockListSnapshot_;
     mutable juce::CriticalSection    blockListSnapshotMutex_;
+
+    static constexpr int  kMaxUndoDepth = 20;
+    std::vector<int>      undoStack_;
+    std::atomic<bool>     pendingUndo_ { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ViewPortComponent)
 };

@@ -680,6 +680,37 @@ void ViewPortComponent::renderOpenGL()
             }
         }
     }
+
+    // ── Drain pending undo (Ctrl+Z) ───────────────────────────────────────────
+    if (pendingUndo_.exchange(false) && !undoStack_.empty())
+    {
+        const int serialToRemove = undoStack_.back();
+        undoStack_.pop_back();
+
+        auto it = std::find_if(blockList.begin(), blockList.end(),
+            [&](const BlockEntry& e) { return e.serial == serialToRemove; });
+
+        if (it != blockList.end())
+        {
+            voxelGrid.remove(it->pos);
+            blockList.erase(it);
+            renderer.meshDirty = true;
+
+            std::vector<SidebarComponent::Block> uiBlocks;
+            uiBlocks.reserve(blockList.size());
+            for (const auto& e : blockList)
+                uiBlocks.push_back({ e.serial, e.pos });
+
+            juce::MessageManager::callAsync([this, uiBlocks]()
+            {
+                if (sidebar != nullptr)
+                    sidebar->setBlocks(uiBlocks);
+                if (onBlockListChanged)
+                    onBlockListChanged();
+            });
+        }
+    }
+
     if (placeReq.active)
     {
         const int   w = getWidth(), h = getHeight();
@@ -771,6 +802,12 @@ void ViewPortComponent::renderOpenGL()
 
             blockList.push_back(newBlock);
             lastPlacedPos = placePos;
+
+            // Track for undo (Ctrl+Z removes the most recently placed block)
+            undoStack_.push_back(newBlock.serial);
+            if ((int)undoStack_.size() > kMaxUndoDepth)
+                undoStack_.erase(undoStack_.begin());
+
             renderer.meshDirty = true;
             std::vector<SidebarComponent::Block> uiBlocks;
             uiBlocks.reserve(blockList.size());
@@ -1090,67 +1127,37 @@ void ViewPortComponent::renderOpenGL()
         gizmo_.axes[2] = { rgt.z, -up.z };
     }
 
-    // ── Update HUD recording flag (read by paint() on message thread) ─────────
+    // ── Update HUD state (read by paint() on message thread) ─────────────────
     {
-        juce::ScopedLock lock(hud.lock);
-        hud.isRecording = (editMode && recordKeyHeld && recordingBlockSerial >= 0);
-        hud.isEditMode  = editMode;
-    }
-// ── HUD ─────────────────────────────────────────────────────────
-    
-    {
-        juce::String info = "Voxels: " + juce::String((int)voxelGrid.size());
-
+        // Compute cursor position for the HUD
+        Vec3i curPos { 0, 0, 0 };
         if (shiftHeld && shiftPreviewValid)
         {
-            info += "  Pos: (" + juce::String(shiftPreviewPos.x) + ","
-                            + juce::String(shiftPreviewPos.y) + ","
-                            + juce::String(shiftPreviewPos.z) + ")";
+            curPos = shiftPreviewPos;
         }
         else if (hasHit && currentHit.hit)
         {
-            Vec3i placePos = Raycaster::getPlacementPos(currentHit);
-
-            info += "  Pos: (" + juce::String(placePos.x) + ","
-                            + juce::String(placePos.y) + ","
-                            + juce::String(placePos.z) + ")";
+            curPos = Raycaster::getPlacementPos(currentHit);
         }
         else
         {
             Vec3i gp = Raycaster::groundPlaneHit(camera.getPosition(), currentRayDir);
-
             if (gp != Vec3i{})
-            {
-                info += "  Pos: (" + juce::String(gp.x) + ","
-                                + juce::String(gp.y) + ","
-                                + juce::String(gp.z) + ")";
-            }
+                curPos = gp;
             else
             {
                 Vec3f pt = camera.getPosition() + currentRayDir * 8.0f;
-                Vec3i pos = pt.floor();
-
-                info += "  Pos: (" + juce::String(pos.x) + ","
-                                + juce::String(pos.y) + ","
-                                + juce::String(pos.z) + ")";
+                curPos = pt.floor();
             }
         }
 
-        if (shiftHeld){
-            info += "  SHIFT PLANE Y=" + juce::String(shiftPlaneY)
-                + "  (scroll to raise/lower)";
-        }
-        else if (editMode && recordKeyHeld && recordingBlockSerial >= 0){
-            info += "  RECORDING MOVEMENT  (release mouse to finish)";
-        }
-        else if (editMode){
-            info += "  EDIT MODE  Click a block to set time  |  Alt+Click = Record movement  |  Tab = Exit";
-        }
-        else
-            info += "  LMB=Place  RMB=Look/Remove  WASD=Move  Space/Q=Up/Down  Shift=AirPlace  Tab=Edit  C=Clear";
-
         juce::ScopedLock lock(hud.lock);
-        hud.text = info;
+        hud.isRecording = (editMode && recordKeyHeld && recordingBlockSerial >= 0);
+        hud.isEditMode  = editMode;
+        hud.isShiftMode = shiftHeld;
+        hud.shiftY      = shiftPlaneY;
+        hud.voxelCount  = static_cast<int>(voxelGrid.size());
+        hud.cursorPos   = curPos;
     }
 
     // ── Refresh blockList snapshot for safe message-thread reads ─────────────
@@ -1239,62 +1246,247 @@ void ViewPortComponent::doRaycast(float mx, float my)
 
 void ViewPortComponent::paint(juce::Graphics& g)
 {
-    // ── HUD bar ───────────────────────────────────────────────────────────────
-    juce::String txt;
-    bool isRec      = false;
-    bool isEditMode = false;
+    // ── Read HUD state ────────────────────────────────────────────────────────
+    bool  isRec, isEdit, isShift;
+    int   voxels, shiftY;
+    Vec3i cur;
     {
         juce::ScopedLock lock(hud.lock);
-        txt        = hud.text;
-        isRec      = hud.isRecording;
-        isEditMode = hud.isEditMode;
+        isRec   = hud.isRecording;
+        isEdit  = hud.isEditMode;
+        isShift = hud.isShiftMode;
+        voxels  = hud.voxelCount;
+        shiftY  = hud.shiftY;
+        cur     = hud.cursorPos;
     }
 
-    if (txt.isNotEmpty())
-    {
-        g.setColour(juce::Colours::black);
-        g.fillRect(0, 0, getWidth(), 26);
+    // ─────────────────────────────────────────────────────────────────────────
+    // Palette
+    // ─────────────────────────────────────────────────────────────────────────
+    const juce::Colour pillBg     (0xd4101420);   // dark navy, 83% alpha
+    const juce::Colour pillBorder (0x553c4b73);   // muted blue border
+    const juce::Colour cPrimary   (0xffe8ecf5);   // near-white values
+    const juce::Colour cMuted     (0xff4e5a78);   // muted labels
+    const juce::Colour cDivider   (0xff252d44);   // subtle divider line
+    const juce::Colour cX         (0xffee5050);   // X axis red
+    const juce::Colour cY         (0xff44dd88);   // Y axis green
+    const juce::Colour cZ         (0xff4488ee);   // Z axis blue
+    const juce::Colour cEdit      (0xffaa77ff);   // edit mode purple
+    const juce::Colour cShift     (0xff33ddcc);   // shift plane cyan
+    const juce::Colour cRec       (0xffdd3333);   // recording red
 
-        g.setFont(juce::Font("Inter", 15.f, juce::Font::plain));
-        g.setColour(juce::Colour(0xffdddddd));
-        g.drawText(txt, 8, 4, getWidth() - 16, 20,
-                   juce::Justification::centredLeft, true);
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fonts
+    // ─────────────────────────────────────────────────────────────────────────
+    const juce::Font fLabel (juce::Font("Inter", 9.f,  juce::Font::plain));
+    const juce::Font fValue (juce::Font("Inter", 14.f, juce::Font::plain));
+    const juce::Font fBadge (juce::Font("Inter", 11.f, juce::Font::bold));
+    const juce::Font fHint  (juce::Font("Inter", 11.f, juce::Font::plain));
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Helper: draw a pill background + border
+    // ─────────────────────────────────────────────────────────────────────────
+    auto drawPill = [&](juce::Rectangle<float> r, float radius = 7.f)
+    {
+        g.setColour(pillBg);
+        g.fillRoundedRectangle(r, radius);
+        g.setColour(pillBorder);
+        g.drawRoundedRectangle(r.reduced(0.5f), radius, 1.f);
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Stats pill  (top-left)
+    //
+    //  ┌──────────────────────────────────────────────────┐
+    //  │  BLOCKS       │  X  -12   Y   1   Z  39          │
+    //  │    42         │                                   │
+    //  └──────────────────────────────────────────────────┘
+    //
+    // Two rows: labels on top (9 pt, muted), values below (14 pt, white).
+    // X/Y/Z labels are colour-coded; values are monospaced-width cells.
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+        constexpr int kPY   = 10;    // pill top
+        constexpr int kPH   = 36;    // pill height
+        constexpr int kIPad = 14;    // inner horizontal padding
+        constexpr int kColB = 52;    // width of BLOCKS column
+        constexpr int kDivW = 18;    // divider region width (gap+line+gap)
+        constexpr int kColC = 40;    // width of each XYZ column (label+value)
+        const int     kPX   = 12;    // pill left edge
+
+        const float pillW = kIPad + kColB + kDivW + kColC * 3 + kIPad;
+        drawPill({ (float)kPX, (float)kPY, pillW, (float)kPH });
+
+        // ── BLOCKS column ─────────────────────────────────────────────────────
+        int cx = kPX + kIPad;
+
+        g.setFont(fLabel);
+        g.setColour(cMuted);
+        g.drawText("BLOCKS", cx, kPY + 4, kColB, 11,
+                   juce::Justification::centredLeft, false);
+
+        g.setFont(fValue);
+        g.setColour(cPrimary);
+        g.drawText(juce::String(voxels), cx, kPY + 15, kColB, 17,
+                   juce::Justification::centredLeft, false);
+
+        cx += kColB;
+
+        // ── Divider ───────────────────────────────────────────────────────────
+        float divX = (float)cx + kDivW * 0.5f;
+        g.setColour(cDivider);
+        g.drawLine(divX, (float)kPY + 8.f, divX, (float)(kPY + kPH) - 8.f, 1.f);
+        cx += kDivW;
+
+        // ── X / Y / Z columns ─────────────────────────────────────────────────
+        const juce::Colour axCols[] = { cX, cY, cZ };
+        const char*        axLbls[] = { "X", "Y", "Z" };
+        const int          axVals[] = { cur.x, cur.y, cur.z };
+
+        for (int i = 0; i < 3; ++i)
+        {
+            // Label row
+            g.setFont(fLabel);
+            g.setColour(axCols[i]);
+            g.drawText(axLbls[i], cx, kPY + 4, kColC, 11,
+                       juce::Justification::centredLeft, false);
+
+            // Value row
+            g.setFont(fValue);
+            g.setColour(cPrimary);
+            g.drawText(juce::String(axVals[i]), cx, kPY + 15, kColC, 17,
+                       juce::Justification::centredLeft, false);
+
+            cx += kColC;
+        }
     }
 
-    // ── Recording indicator (red dot + REC label) — left side ────────────────
-    if (isRec)
+    // ─────────────────────────────────────────────────────────────────────────
+    // Mode badge  (inline, to the right of the stats pill)
+    //
+    // Only visible when in a non-default mode.
+    // Uses a tinted fill + coloured border in the mode's accent colour.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (isRec || isEdit || isShift)
     {
-        constexpr int kIndW = 70, kIndH = 24;
-        constexpr int indX  = 12;
-        constexpr int indY  = 30;
+        juce::Colour accent;
+        juce::String label;
 
-        g.setColour(juce::Colours::black.withAlpha(0.60f));
-        g.fillRoundedRectangle((float)indX, (float)indY, (float)kIndW, (float)kIndH, 6.f);
+        if (isRec)
+        {
+            accent = cRec;
+            label  = "REC";
+        }
+        else if (isShift)
+        {
+            accent = cShift;
+            label  = "SHIFT PLANE  Y = " + juce::String(shiftY);
+        }
+        else
+        {
+            accent = cEdit;
+            label  = "EDIT MODE";
+        }
 
-        g.setColour(juce::Colour(0xffff2020));
-        g.fillEllipse((float)(indX + 8), (float)(indY + 6), 12.f, 12.f);
+        constexpr int kBY = 10;
+        constexpr int kBH = 36;
+        const     int kBX = 12 + 14 + 52 + 18 + 40 * 3 + 14 + 8; // right of stats pill + gap
 
-        g.setFont(juce::Font(13.f, juce::Font::bold));
-        g.setColour(juce::Colours::white);
-        g.drawText("REC", indX + 26, indY + 4, 36, 16,
+        g.setFont(fBadge);
+        const float textW  = g.getCurrentFont().getStringWidthFloat(label);
+        const float dotGap = isRec ? 24.f : 0.f;   // extra room for the dot
+        const float pillW  = dotGap + textW + 28.f;
+
+        juce::Rectangle<float> badge((float)kBX, (float)kBY, pillW, (float)kBH);
+
+        // Tinted fill (accent at low alpha)
+        g.setColour(accent.withAlpha(0.12f));
+        g.fillRoundedRectangle(badge, 7.f);
+
+        // Accent border
+        g.setColour(accent.withAlpha(0.65f));
+        g.drawRoundedRectangle(badge.reduced(0.5f), 7.f, 1.f);
+
+        if (isRec)
+        {
+            // Pulsing dot (static for now — no animation needed)
+            g.setColour(cRec);
+            g.fillEllipse((float)kBX + 12.f, (float)kBY + 12.f, 12.f, 12.f);
+        }
+
+        g.setFont(fBadge);
+        g.setColour(accent);
+        g.drawText(label,
+                   (int)badge.getX() + (int)dotGap + 10,
+                   kBY + 4,
+                   (int)textW + 14,
+                   kBH - 8,
                    juce::Justification::centredLeft, false);
     }
 
-    // ── View gizmo + direction buttons (top-right) ──────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // Hints pill  (bottom-centre)
+    //
+    // Context-sensitive shortcut reference.  Key names are slightly brighter
+    // than the surrounding muted text via inline colour changes.
+    // ─────────────────────────────────────────────────────────────────────────
+    {
+        // Use middle dot (U+00B7) between key and action for a clean look
+        const juce::String dot = juce::String::fromUTF8(" \xc2\xb7 ");
+
+        juce::String hint;
+        if (isRec)
+            hint = "Release Mouse" + dot + "Finish Recording";
+        else if (isShift)
+            hint = "Scroll" + dot + "Raise / Lower Plane"
+                 + "    LMB" + dot + "Place"
+                 + "    RMB" + dot + "Look";
+        else if (isEdit)
+            hint = "LMB" + dot + "Select"
+                 + "    RMB" + dot + "Edit Block"
+                 + "    Alt+LMB" + dot + "Record Movement"
+                 + "    Tab" + dot + "Exit Edit";
+        else
+            hint = "LMB" + dot + "Place"
+                 + "    RMB" + dot + "Look / Remove"
+                 + "    WASD" + dot + "Move"
+                 + "    Space/Q" + dot + "Up / Down"
+                 + "    Shift" + dot + "Air Place"
+                 + "    Tab" + dot + "Edit"
+                 + "    C" + dot + "Clear";
+
+        g.setFont(fHint);
+        const float tw    = g.getCurrentFont().getStringWidthFloat(hint);
+        const float pw    = tw + 28.f;
+        const float ph    = 24.f;
+        const float px    = ((float)getWidth()  - pw) * 0.5f;
+        const float py    = (float)getHeight() - ph - 10.f;
+
+        drawPill({ px, py, pw, ph }, 6.f);
+
+        g.setColour(cMuted.brighter(0.25f));
+        g.drawText(hint,
+                   (int)px + 14, (int)py,
+                   (int)tw, (int)ph,
+                   juce::Justification::centredLeft, false);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // View gizmo + direction buttons  (top-right, unchanged)
+    // ─────────────────────────────────────────────────────────────────────────
     {
         const int w = getWidth();
-        const int gizmoR    = 30;   // radius of gizmo circle
+        const int gizmoR    = 30;
         const int gizmoCx   = w - 16 - gizmoR;
         const int gizmoCy   = 30 + gizmoR;
         const float axisLen = static_cast<float>(gizmoR - 4);
 
-        // Background circle
-        g.setColour(juce::Colours::black.withAlpha(0.50f));
+        g.setColour(pillBg);
         g.fillEllipse(static_cast<float>(gizmoCx - gizmoR),
                        static_cast<float>(gizmoCy - gizmoR),
                        static_cast<float>(gizmoR * 2),
                        static_cast<float>(gizmoR * 2));
-        g.setColour(juce::Colour(0xff334466));
+        g.setColour(pillBorder);
         g.drawEllipse(static_cast<float>(gizmoCx - gizmoR),
                        static_cast<float>(gizmoCy - gizmoR),
                        static_cast<float>(gizmoR * 2),
@@ -1308,13 +1500,8 @@ void ViewPortComponent::paint(juce::Graphics& g)
             axes[2] = gizmo_.axes[2];
         }
 
-        // Draw axis lines: X=red, Y=green, Z=blue
-        const juce::Colour axisColors[] = {
-            juce::Colour(0xffee3333),
-            juce::Colour(0xff33cc33),
-            juce::Colour(0xff3388ee)
-        };
-        const char* axisLabels[] = { "X", "Y", "Z" };
+        const juce::Colour axisColors[] = { cX, cY, cZ };
+        const char* axisLabels[]        = { "X", "Y", "Z" };
 
         for (int i = 0; i < 3; ++i)
         {
@@ -1324,9 +1511,8 @@ void ViewPortComponent::paint(juce::Graphics& g)
             g.setColour(axisColors[i]);
             g.drawLine(static_cast<float>(gizmoCx), static_cast<float>(gizmoCy),
                        ex, ey, 2.0f);
-
-            // Small dot + label at endpoint
             g.fillEllipse(ex - 3.f, ey - 3.f, 6.f, 6.f);
+
             g.setFont(juce::Font(10.f, juce::Font::bold));
             g.drawText(axisLabels[i],
                        static_cast<int>(ex) - 6,
@@ -1335,20 +1521,16 @@ void ViewPortComponent::paint(juce::Graphics& g)
                        juce::Justification::centred, false);
         }
 
-        // Direction buttons below the gizmo
         const char* btnLabels[] = { "Front", "Back", "Right", "Left" };
-        const juce::Colour btnHover(0xff445577);
-        const juce::Colour btnNormal(0xcc1a1e2e);
-
         for (int i = 0; i < 4; ++i)
         {
             auto r = getGizmoButtonRect(i);
-            g.setColour(btnNormal);
+            g.setColour(pillBg);
             g.fillRoundedRectangle(r.toFloat(), 4.f);
-            g.setColour(juce::Colour(0xff556688));
+            g.setColour(pillBorder);
             g.drawRoundedRectangle(r.toFloat().reduced(0.5f), 4.f, 1.f);
             g.setFont(juce::Font(11.f));
-            g.setColour(juce::Colour(0xffccddee));
+            g.setColour(cPrimary.withAlpha(0.8f));
             g.drawText(btnLabels[i], r, juce::Justification::centred, false);
         }
     }
@@ -1474,9 +1656,8 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
             return;  // never place a block in edit mode
         }
 
-        // Normal mode LMB: notify sidebar of block click, or queue placement.
-        // The message-thread raycast here is a pre-existing minor race (read-only
-        // on voxelGrid + blockList snapshot); acceptable until a larger refactor.
+        // Normal mode LMB: queue placement for the GL thread.
+        // Also fire onBlockSelected if the ray hits an existing block (sidebar highlight).
         {
             const int   w = getWidth(), h = getHeight();
             const float aspect = (h > 0) ? (float)w / h : 1.f;
@@ -1497,7 +1678,9 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
                     }
                 }
             }
-            else
+
+            // Always queue — the GL thread does its own fresh raycast to compute
+            // the correct adjacent face position, so this is always safe.
             {
                 juce::ScopedLock lock(clickMutex);
                 pendingPlace = { true, e.position.x, e.position.y,

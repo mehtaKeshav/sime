@@ -50,16 +50,25 @@ MainComponent::MainComponent()
     view.onBlockSelected = [this](int serial)
     {
         auto block = view.getBlockBySerial(serial);
-
         if (block)
             sidebar.showBlockInfo(*block);
     };
 
     // Update the transport bar immediately when blocks are added / removed / loaded,
     // instead of waiting up to 33 ms for the next timerCallback tick.
+    // Also drives the dirty / title-bar state, gated by suppressNextDirty_ so
+    // that loads and new-scene operations do not falsely mark the scene as modified.
     view.onBlockListChanged = [this]()
     {
         transportBar.setBlocks(view.getBlockListCopy());
+        if (suppressNextDirty_)
+        {
+            suppressNextDirty_ = false;
+        }
+        else
+        {
+            markDirty();
+        }
     };
 
     
@@ -97,7 +106,9 @@ MainComponent::MainComponent()
     {
         view.updateBlockTiming(serial, start, duration);
         auto block = view.getBlockBySerial(serial);
-        sidebar.showBlockInfo(*block);
+        if (block)                       // null-check: block may have been deleted
+            sidebar.showBlockInfo(*block);
+        markDirty();
     };
 
     transportBar.onTimelineBlockClicked = [this](int serial) { 
@@ -124,6 +135,7 @@ MainComponent::MainComponent()
             sidebar.showBlockInfo(*updated);
 
         transportBar.setBlocks(view.getBlockListCopy());
+        markDirty();
     };
 
     // ── Block type toolbar ────────────────────────────────────────────────────
@@ -172,6 +184,7 @@ MainComponent::MainComponent()
     {
         view.applyBlockEdit(serial, start, dur, sid, customFile,
                             isLooping, loopDur);
+        markDirty();
     };
 
     editPopup.onCancel = [this]()
@@ -506,8 +519,11 @@ MainComponent::~MainComponent()
 
 void MainComponent::newScene()
 {
-    view.clearScene();
+    suppressNextDirty_ = true;   // the upcoming clear won't mark the scene dirty
+    hasUnsavedChanges_ = false;
     currentFilePath_.clear();
+    view.clearScene();
+    updateWindowTitle();
 }
 
 void MainComponent::saveScene(const juce::String& explicitPath)
@@ -519,7 +535,9 @@ void MainComponent::saveScene(const juce::String& explicitPath)
         auto blocks = view.getBlockListCopy();
         if (SceneFile::save(target.toStdString(), blocks))
         {
-            currentFilePath_ = target;
+            currentFilePath_   = target;
+            hasUnsavedChanges_ = false;
+            updateWindowTitle();
             DBG("Scene saved: " << target);
         }
         return;
@@ -544,7 +562,9 @@ void MainComponent::saveScene(const juce::String& explicitPath)
             auto blocks = view.getBlockListCopy();
             if (SceneFile::save(path.toStdString(), blocks))
             {
-                currentFilePath_ = path;
+                currentFilePath_   = path;
+                hasUnsavedChanges_ = false;
+                updateWindowTitle();
                 DBG("Scene saved: " << path);
             }
         });
@@ -568,8 +588,11 @@ void MainComponent::openScene()
             std::vector<BlockEntry> loaded;
             if (SceneFile::load(path.toStdString(), loaded))
             {
+                suppressNextDirty_ = true;
+                hasUnsavedChanges_ = false;
                 view.loadScene(std::move(loaded));
                 currentFilePath_ = path;
+                updateWindowTitle();
                 DBG("Scene loaded: " << path << "  (" << (int)view.getBlockListCopy().size() << " blocks)");
             }
             else
@@ -599,8 +622,11 @@ void MainComponent::loadSceneFromFile(const juce::String& path)
     std::vector<BlockEntry> loaded;
     if (SceneFile::load(path.toStdString(), loaded))
     {
+        suppressNextDirty_ = true;   // the upcoming load won't mark the scene dirty
+        hasUnsavedChanges_ = false;
         view.loadScene(std::move(loaded));
         currentFilePath_ = path;
+        updateWindowTitle();
     }
 }
 
@@ -624,4 +650,59 @@ void MainComponent::stopPlaybackAndResetUi()
     view.transportStop();
 
     setPlaybackUiState(false, false, 0.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Title bar + dirty tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MainComponent::updateWindowTitle()
+{
+    // em dash U+2014 = \xe2\x80\x94
+    const juce::String dash = juce::String::fromUTF8("\xe2\x80\x94");
+    juce::String title = "SIME";
+
+    if (currentFilePath_.isNotEmpty())
+        title += " " + dash + " " + juce::File(currentFilePath_).getFileName();
+    else if (hasUnsavedChanges_)
+        title += " " + dash + " Untitled";
+
+    if (hasUnsavedChanges_)
+        title += " *";
+
+    if (auto* tlc = getTopLevelComponent())
+        tlc->setName(title);
+}
+
+void MainComponent::markDirty()
+{
+    hasUnsavedChanges_ = true;
+    updateWindowTitle();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyboard shortcuts  (Ctrl+S = Save,  Ctrl+Z = Undo last placement)
+//
+// ViewPortComponent.keyPressed() returns false for all Ctrl combos, so these
+// bubble up from the focused viewport to here automatically.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool MainComponent::keyPressed(const juce::KeyPress& k)
+{
+    if (k.getModifiers().isCtrlDown())
+    {
+        if (k.getKeyCode() == 'S' || k.getKeyCode() == 's')
+        {
+            saveScene();
+            return true;
+        }
+
+        if (k.getKeyCode() == 'Z' || k.getKeyCode() == 'z')
+        {
+            view.requestUndo();
+            return true;
+        }
+    }
+
+    return false;
 }

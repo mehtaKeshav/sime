@@ -17,6 +17,7 @@ public:
 
     void paint(juce::Graphics&) override;
     void resized() override;
+    bool keyPressed(const juce::KeyPress&) override;
 
     void saveScene(const juce::String& path = {});
     void openScene();
@@ -77,5 +78,13 @@ private:
     void setPlaybackUiState(bool playing, bool paused, double currentTime);
     void stopPlaybackAndResetUi();
     void timerCallback() override;
+
+    // ── Title bar + dirty tracking ────────────────────────────────────────────
+    bool hasUnsavedChanges_  = false;
+    bool suppressNextDirty_  = false;   ///< Set before load/new to ignore the
+                                         ///  onBlockListChanged that follows them.
+    void updateWindowTitle();
+    void markDirty();                    ///< Set dirty + refresh title bar
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
