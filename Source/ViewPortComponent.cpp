@@ -415,8 +415,16 @@ void ViewPortComponent::renderOpenGL()
             {
                 if (b.serial == tu.serial)
                 {
-                    b.startTimeSec = tu.start;
-                    b.durationSec  = tu.duration;
+                    if(tu.timeIndex >= 0 && tu.timeIndex < (int)b.timesList.size())
+                    {
+                        b.timesList[tu.timeIndex].startTimeSec = tu.start;
+                        b.timesList[tu.timeIndex].durationSec  = tu.duration;
+                    }
+                    else
+                    {
+                        b.startTimeSec = tu.start;
+                        b.durationSec  = tu.duration;
+                    }
                     break;
                 }
             }
@@ -904,7 +912,7 @@ void ViewPortComponent::renderOpenGL()
         const double curT = transportClock.currentTimeSec();
         if (transportClock.isLooping() && curT < prevTransportTime)
         {
-            SequencerEngine::resetAllBlocks(blockList);
+            sequencer.resetAllBlocks(blockList);
             
             // Reset positions to initial keyframe
             for (auto& b : blockList)
@@ -1989,11 +1997,11 @@ bool ViewPortComponent::keyPressed(const juce::KeyPress& k)
     return false;
 }
 
-void ViewPortComponent::updateBlockTiming(int serial, double start, double duration)
+void ViewPortComponent::updateBlockTiming(int serial,int timeIndex,double start,double duration)
 {
     // Queue for the GL thread — safe to call from the message thread.
     juce::ScopedLock lock(timingMutex_);
-    pendingTimingUpdate_ = { serial, start, duration, true };
+    pendingTimingUpdate_ = { serial, start, duration, true, timeIndex};
 }
 
 void ViewPortComponent::focusGained(FocusChangeType) {}
@@ -2050,3 +2058,30 @@ void ViewPortComponent::seekTransportClock(double newTimeSec)
 {
     transportClock.seekTo(newTimeSec);
 } 
+
+void ViewPortComponent::addTimeRangeToBlock(int serial, double start, double duration)
+{
+    for (auto& b : blockList)
+    {
+        if (b.serial == serial)
+        {
+            b.addTimeRange(start, duration);
+            break;
+        }
+    }
+}
+
+void ViewPortComponent::updateBlockTimeRange(int serial, int timeIndex, double start, double duration)
+{
+    for (auto& b : blockList)
+    {
+        if (b.serial == serial &&
+            timeIndex >= 0 &&
+            timeIndex < static_cast<int>(b.timesList.size()))
+        {
+            b.timesList[timeIndex].startTimeSec = start;
+            b.timesList[timeIndex].durationSec = duration;
+            break;
+        }
+    }
+}

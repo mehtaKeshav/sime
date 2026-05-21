@@ -26,6 +26,17 @@ struct MovementKeyFrame
     Vec3i  position;  // Absolute world position at this keyframe
 };
 
+struct TimeRange
+{
+    double startTimeSec = 0.0;
+    double durationSec  = 1.0;
+
+    double endTimeSec() const
+    {
+        return startTimeSec + durationSec;
+    }
+};
+
 struct BlockEntry
 {
     // ── Identity ──────────────────────────────────────────────────────────────
@@ -41,6 +52,8 @@ struct BlockEntry
     // ── Timing (seconds relative to transport origin) ─────────────────────────
     double startTimeSec = 0.0;
     double durationSec  = 1.0;
+
+    std::vector<TimeRange> timesList;
 
     // ── Loop ──────────────────────────────────────────────────────────────────
     bool   isLooping           = false;  ///< When true, re-trigger every durationSec
@@ -73,6 +86,30 @@ struct BlockEntry
     double endTimeSec() const noexcept
     {
         return startTimeSec + (isLooping ? loopDurationSec : durationSec);
+    }
+    bool overlaps(double aStart, double aDuration, double bStart, double bDuration)
+    {
+        const double aEnd = aStart + aDuration;
+        const double bEnd = bStart + bDuration;
+
+        return aStart < bEnd && aEnd > bStart;
+    }
+    bool addTimeRange(double start, double duration)
+    {
+        if (start < 0.0 || duration <= 0.05)
+            return false;
+
+
+        if (overlaps(start, duration, startTimeSec, durationSec))
+            return false;
+        for (const auto& t : timesList)
+        {
+            if (overlaps(start, duration, t.startTimeSec, t.durationSec))
+                return false;
+        }
+
+        timesList.push_back({ start, duration });
+        return true;
     }
 
     void resetPlaybackState()

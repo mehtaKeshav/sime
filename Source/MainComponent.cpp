@@ -102,13 +102,24 @@ MainComponent::MainComponent()
         stopPlaybackAndResetUi();
         transportBar.setTimelinePlaying(false);
     };
-    transportBar.onBlockEdited = [this](int serial, double start, double duration)
+    transportBar.onBlockEdited = [this](int serial, int occurrenceIndex, double start, double duration)
     {
-        view.updateBlockTiming(serial, start, duration);
+        view.updateBlockTiming(serial, occurrenceIndex, start, duration);
+        transportBar.setBlocks(view.getBlocks());
         auto block = view.getBlockBySerial(serial);
-        if (block)                       // null-check: block may have been deleted
+        if (block)
+            sidebar.showBlockInfo(*block); 
+        markDirty();                      
+    };
+    
+    transportBar.onRegionDuplicated = [this](int serial, double start, double duration)
+    {
+        view.addTimeRangeToBlock(serial, start, duration);
+
+        transportBar.setBlocks(view.getBlocks());
+
+        if (auto block = view.getBlockBySerial(serial))
             sidebar.showBlockInfo(*block);
-        markDirty();
     };
 
     transportBar.onTimelineBlockClicked = [this](int serial) { 

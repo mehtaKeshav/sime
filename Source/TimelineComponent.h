@@ -43,27 +43,52 @@ public:
     std::function<void(int blockSerial)> onRectRegionClicked;
     
     /// Callback when user drags to edit a block's timing
-    std::function<void(int serial, double startTime, double duration)> onBlockEdited;
-    std::function<void(double newTimeSec)> onPlayheadMoved;
-    
+    std::function<void(int serial, int timeIndex, double startTime, double duration)> onBlockEdited;
+    std::function<void(double newTimeSec)> onPlayheadMoved;    
     void setBpm(double newBpm);
     void setSnapToGrid(bool shouldSnap);
     void setSubdivision(int newSubdivision);
+
+    bool keyPressed(const juce::KeyPress& key) override;
+    void mouseMove(const juce::MouseEvent& e) override;
+
+    std::function<void(int serial, double start, double duration)> onRegionDuplicated;
+
+    std::function<void(int serial, int timeIndex,
+                    double start, double duration)> onRegionEdited;
     
     private:
     struct BlockRegion
     {
-        int serial;
+        int serial = 0;
+        int timeIndex = -1;   // index inside BlockEntry::timesList
+
         BlockType type;
-        double startTime;
-        double duration;
-        int trackIndex;  // Which row to draw in
+        double startTimeSec = 0.0;
+        double durationSec  = 1.0;
+
+        int trackIndex = 0;
         juce::String label;
         Vec3f color;
     };
     // =========================
     // Rhythm / grid settings
     // =========================
+    std::optional<BlockRegion> copiedRegion_;
+
+    BlockRegion selectedRegion_;
+    bool hasSelectedRegion_ = false;
+
+    double mouseCursorTime_ = 0.0;
+    int mouseTrackIndex_ = -1;
+
+    int selectedTimeIndex_ = -1;
+
+    int yToTrackIndex(int y) const;
+    bool canPlaceRegion(const BlockRegion& moving,
+                        double newStart,
+                        double newDuration) const;
+
     double bpm_ = 120.0;
     int beatsPerBar_ = 4;
     int subdivision_ = 16;     // 16 = sixteenth-note grid
@@ -132,6 +157,7 @@ public:
     void paintTracks(juce::Graphics& g, juce::Rectangle<int> area);
     void paintPlayhead(juce::Graphics& g, juce::Rectangle<int> area);
     void paintBeatGrid(juce::Graphics& g, juce::Rectangle<int> tracksArea);
+    int TimelineComponent::yToTrackIndex(int y);
     
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TimelineComponent)

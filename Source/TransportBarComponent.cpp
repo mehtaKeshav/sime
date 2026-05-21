@@ -69,10 +69,10 @@ TransportBarComponent::TransportBarComponent()
     timeLabel.setJustificationType(juce::Justification::centred);
 
     // ── Timeline callbacks ────────────────────────────────────────────────────
-    timeline.onBlockEdited = [this](int serial, double start, double duration)
+    timeline.onBlockEdited = [this](int serial, int timeIndex, double start, double duration)
     {
         if (onBlockEdited)
-            onBlockEdited(serial, start, duration);
+            onBlockEdited(serial, timeIndex, start, duration);
     };
 
     timeline.onPlayheadMoved = [this](double newTimeSec)
@@ -85,6 +85,18 @@ TransportBarComponent::TransportBarComponent()
     {
         if (onTimelineBlockClicked)
             onTimelineBlockClicked(serial);
+    };
+    timeline.onRegionDuplicated = [this](int serial, double start, double duration)
+    {
+        if (onRegionDuplicated)
+            onRegionDuplicated(serial, start, duration);
+    };
+
+    timeline.onRegionEdited = [this](int serial, int timeIndex,
+                                    double start, double duration)
+    {
+        if (onRegionEdited)
+            onRegionEdited(serial, timeIndex, start, duration);
     };
 
     // ── Collapse button ───────────────────────────────────────────────────────

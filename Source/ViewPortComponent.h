@@ -76,7 +76,7 @@ public:
     /// waiting for the next 30 Hz timer tick.
     std::function<void()> onBlockListChanged;
 
-    void updateBlockTiming(int serial, double startTime, double duration);
+    void updateBlockTiming(int serial, int timeIndex, double start, double duration);
 
     /// Queue an undo of the last block placement. Safe to call from the message thread.
     void requestUndo() { pendingUndo_.store(true); }
@@ -185,6 +185,7 @@ public:
     {
         transportClock.stop();
         pendingStop_ = true;   // GL thread drains this and calls resetAllBlocks
+        SequencerEngine::resetAllBlocks(blockList);
     }
 
     /// Fast-forward / playback speed. 1.0 = real time. Routes to both the
@@ -226,6 +227,18 @@ public:
                                  juce::String& errorOut);
 
     void seekTransportClock(double newTimeSec);
+    void addTimeRangeToBlock(int serial, double start, double duration);
+
+    void updateBlockTimeRange(int serial,
+                            int timeIndex,
+                            double start,
+                            double duration);
+
+    const std::vector<BlockEntry>& getBlocks() const{
+        return blockList;
+    }
+
+   
 
 private:
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -459,6 +472,7 @@ private:
         double start    = 0.0;
         double duration = 1.0;
         bool   active   = false;
+        int   timeIndex = -1;
     };
     PendingTimingUpdate   pendingTimingUpdate_;
     juce::CriticalSection timingMutex_;

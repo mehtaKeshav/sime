@@ -23,7 +23,7 @@ public:
     std::function<void()> onPlay;
     std::function<void()> onPause;
     std::function<void()> onStop;
-    std::function<void(int, double, double)> onBlockEdited;
+    std::function<void(int, int, double, double)> onBlockEdited;
 
     // ── State pushed in from MainComponent each timer tick ────────────────────
     // Call this from a juce::Timer or after each transport update to keep
@@ -48,6 +48,11 @@ public:
     std::function<void(double)> onBpmChanged;
     std::function<void(double newTimeSec)> onPlayheadMoved;
     std::function<void(double rate)> onSpeedChanged;
+
+    std::function<void(int serial, double start, double duration)> onRegionDuplicated;
+
+    std::function<void(int serial, int timeIndex,
+                    double start, double duration)> onRegionEdited;
 
     
 
