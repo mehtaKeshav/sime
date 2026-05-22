@@ -35,7 +35,7 @@ void TimelineComponent::setBlocks(const std::vector<BlockEntry>& blocks)
                 t.startTimeSec,
                 t.durationSec,
                 trackIndex,
-                juce::String(b.serial),
+                juce::String(b.serial) + " | " + juce::String(trackIndex),
                 b.colour
             });
         }
@@ -518,27 +518,30 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& e)
 
                 return;
             }
-
-
-            
-
             return;
         }
     }
 
+    // No block/region clicked
+    selectedRegion_ = BlockRegion{};
+    hasSelectedRegion_ = false;
+
     selectedBlock_ = -1;
+    selectedTimeIndex_ = -1;
     dragMode_ = DragMode::None;
 
-    if (selectedBlock_ == -1)
-    {
-        followPlayhead_ = false;
+    if (onRectRegionClicked)
+        onRectRegionClicked(-1);
 
-        isPanningTimeline_ = true;
-        isUserPanning_ = true;
+    followPlayhead_ = false;
 
-        lastDragX_ = e.x;
-        lastDragY_ = e.y;
-    }
+    isPanningTimeline_ = true;
+    isUserPanning_ = true;
+
+    lastDragX_ = e.x;
+    lastDragY_ = e.y;
+
+    repaint();
 }
 
 void TimelineComponent::setCurrentTime(double timeSec)
