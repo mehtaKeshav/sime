@@ -102,12 +102,49 @@ MainComponent::MainComponent()
         stopPlaybackAndResetUi();
         transportBar.setTimelinePlaying(false);
     };
-    transportBar.onBlockEdited = [this](int serial, double start, double duration)
+    transportBar.onBlockEdited = [this](int serial, int occurrenceIndex, double start, double duration)
     {
-        view.updateBlockTiming(serial, start, duration);
+        view.updateBlockTiming(serial, occurrenceIndex, start, duration);
+        transportBar.setBlocks(view.getBlocks());
         auto block = view.getBlockBySerial(serial);
-        if (block)                       // null-check: block may have been deleted
+        if (block)
+            sidebar.showBlockInfo(*block); 
+        timerCallback();  // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
+        markDirty();                      
+    };
+
+    transportBar.onDeleteBlockOrRegion = [this](int serial, int timeIndex)
+    {
+        bool deleted = view.deleteBlockOrRegion(serial, timeIndex);
+        if (deleted)
+        {
+            transportBar.setBlocks(view.getBlocks());
+            sidebar.showBlockInfo(BlockEntry{}); // Clear sidebar
+            timerCallback(); // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
+            markDirty();
+        }
+    };
+    
+    transportBar.onRegionDuplicated = [this](int serial, double start, double duration)
+    {
+        view.addTimeRangeToBlock(serial, start, duration);
+        
+        transportBar.setBlocks(view.getBlocks());
+        
+        if (auto block = view.getBlockBySerial(serial))
             sidebar.showBlockInfo(*block);
+        timerCallback(); // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
+        markDirty();  
+    };
+    transportBar.onRegionEdited = [this](int serial, int timeIndex, double start, double duration)
+    {
+        view.updateBlockTimeRange(serial, timeIndex, start, duration);
+        
+        transportBar.setBlocks(view.getBlocks());
+        
+        if (auto block = view.getBlockBySerial(serial))
+            sidebar.showBlockInfo(*block);
+        timerCallback();  // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
         markDirty();
     };
 

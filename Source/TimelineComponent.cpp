@@ -2,38 +2,47 @@
 
 TimelineComponent::TimelineComponent()
 {
-    setWantsKeyboardFocus(false);
+    setWantsKeyboardFocus(true);
 }
 
 void TimelineComponent::setBlocks(const std::vector<BlockEntry>& blocks)
 {
     regions_.clear();
-    
-    // Organize blocks by serial to determine track index
-    std::map<int, int> serialToTrack;
-    int nextTrack = 0;
-    
-    for (const auto& block : blocks)
+
+    int trackIndex = 0;
+
+    for (const auto& b : blocks)
     {
-        if (serialToTrack.find(block.serial) == serialToTrack.end())
-            serialToTrack[block.serial] = nextTrack++;
+        regions_.push_back({ 
+                b.serial,
+                -1,
+                b.blockType,
+                b.startTimeSec,
+                b.durationSec,
+                trackIndex,
+                juce::String(b.serial),
+                b.colour
+            });
         
-        BlockRegion region;
-        region.serial = block.serial;
-        region.type = block.blockType;
-        region.startTime = block.startTimeSec;
-        region.duration = block.durationSec;
-        region.trackIndex = serialToTrack[block.serial];
-        region.label = "Block #" + juce::String(block.serial);
-        region.color = block.colour;
-        
-        regions_.push_back(region);
-        
-        // Update total duration
-        totalDuration_ = std::max(totalDuration_, 
-                                  block.startTimeSec + block.durationSec);
+
+        for (int i = 0; i < (int)b.timesList.size(); ++i)
+        {
+            const auto& t = b.timesList[i];
+            regions_.push_back({
+                b.serial,
+                i,
+                b.blockType,
+                t.startTimeSec,
+                t.durationSec,
+                trackIndex,
+                juce::String(b.serial) + " | " + juce::String(trackIndex),
+                b.colour
+            });
+        }
+
+        ++trackIndex;
     }
-    
+
     repaint();
 }
 
@@ -192,8 +201,8 @@ void TimelineComponent::paintTracks(juce::Graphics& g, juce::Rectangle<int> area
     // Draw block regions
     for (const auto& region : regions_)
     {
-        int x = (int)timeToX(region.startTime);
-        int w = (int)(region.duration * pixelsPerSecond_);
+        int x = (int)timeToX(region.startTimeSec);
+        int w = (int)(region.durationSec * pixelsPerSecond_);
         int y = area.getY() + region.trackIndex * (kTrackHeight + kTrackGap) + 2 - (int)verticalScroll_;
         int h = kTrackHeight - 4;
         
@@ -204,13 +213,36 @@ void TimelineComponent::paintTracks(juce::Graphics& g, juce::Rectangle<int> area
         juce::Rectangle<int> blockRect(x, y, w, h);
         
         // Block color
-        juce::Colour color = juce::Colour::fromFloatRGBA(region.color.x, region.color.y, region.color.z, 1.0f);
-        g.setColour(color.withAlpha(0.9f));
+        juce::Colour baseColor = juce::Colour::fromFloatRGBA(
+            region.color.x,
+            region.color.y,
+            region.color.z,
+            1.0f
+        );
+
+        bool isSelected = false;
+
+        if (hasSelectedRegion_)
+        {
+            isSelected =
+                region.serial == selectedRegion_.serial &&
+                region.timeIndex == selectedRegion_.timeIndex;
+        }
+
+        juce::Colour fillColor = isSelected
+            ? baseColor.interpolatedWith(juce::Colours::white, 0.35f)
+            : baseColor;
+
+        g.setColour(fillColor.withAlpha(0.9f));
         g.fillRoundedRectangle(blockRect.toFloat(), 3.0f);
-        
+
         // Border
-        g.setColour(color.brighter(0.3f));
-        g.drawRoundedRectangle(blockRect.toFloat(), 3.0f, 1.5f);
+        juce::Colour borderColor = isSelected
+            ? baseColor.interpolatedWith(juce::Colours::white, 0.7f)
+            : baseColor.brighter(0.3f);
+
+        g.setColour(borderColor);
+        g.drawRoundedRectangle(blockRect.toFloat(), 3.0f, isSelected ? 2.5f : 1.5f);
         
         // Label
         if (w > 50) // Only show label if wide enough
@@ -287,12 +319,9 @@ void TimelineComponent::mouseWheelMove(const juce::MouseEvent& e,
 
 void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
 {
-    // 1) Drag / resize block rectangles
-
     if (draggingPlayhead_)
     {
-        double newTime = xToTime(e.x);
-        newTime = juce::jmax(0.0, newTime);
+        double newTime = juce::jmax(0.0, xToTime(e.x));
 
         currentTime_ = newTime;
 
@@ -305,65 +334,62 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
 
     if (selectedBlock_ != -1 && dragMode_ != DragMode::None)
     {
-        const double currentMouseTime = xToTime(static_cast<float>(e.x));
+        const double currentMouseTime = xToTime(e.x);
         const double delta = currentMouseTime - dragStartTime_;
 
         for (auto& r : regions_)
         {
-            if (r.serial != selectedBlock_)
+            if (r.serial != selectedBlock_ || r.timeIndex != selectedTimeIndex_)
                 continue;
+
+            double newStart = r.startTimeSec;
+            double newDuration = r.durationSec;
 
             if (dragMode_ == DragMode::Move)
             {
-                double newStartTime = originalStart_ + delta;
-                newStartTime = snapTime(newStartTime);
-
-                r.startTime = std::max(0.0, newStartTime);
-                r.duration = originalDuration_;
+                newStart = snapTime(originalStart_ + delta);
+                newStart = juce::jmax(0.0, newStart);
+                newDuration = originalDuration_;
             }
             else if (dragMode_ == DragMode::ResizeLeft)
             {
-                const double originalEnd = originalStart_ + originalDuration_;
-
-                double newStart = originalStart_ + delta;
-                newStart = snapTime(newStart);
-                newStart = std::max(0.0, newStart);
-
-                double newDuration = originalEnd - newStart;
-
-                if (newDuration >= 0.1)
-                {
-                    r.startTime = newStart;
-                    r.duration = newDuration;
-                }
+                const double oldEnd = originalStart_ + originalDuration_;
+                newStart = snapTime(originalStart_ + delta);
+                newStart = juce::jlimit(0.0, oldEnd - 0.05, newStart);
+                newDuration = oldEnd - newStart;
             }
             else if (dragMode_ == DragMode::ResizeRight)
             {
-                double newEnd = originalStart_ + originalDuration_ + delta;
-                newEnd = snapTime(newEnd);
-
-                double newDuration = newEnd - originalStart_;
-
-                if (newDuration >= 0.1)
-                {
-                    r.startTime = originalStart_;
-                    r.duration = newDuration;
-                }
+                const double newEnd = snapTime(originalStart_ + originalDuration_ + delta);
+                newDuration = newEnd - originalStart_;
             }
 
+            if (!canPlaceRegion(r, newStart, newDuration))
+                return;
+
+            r.startTimeSec = newStart;
+            r.durationSec = newDuration;
+
+            selectedRegion_ = r;
+
             if (onBlockEdited)
-                onBlockEdited(r.serial, r.startTime, r.duration);
+                onBlockEdited(r.serial, r.timeIndex, newStart, newDuration);
 
-            break;
+            repaint();
+            return;
         }
-
-        repaint();
-        return;
     }
 
-    // 2) Empty-space timeline panning
     if (isPanningTimeline_)
     {
+        const int dx = e.x - lastDragX_;
+        const int dy = e.y - lastDragY_;
+
+        viewStartTime_ = std::max(
+            0.0,
+            viewStartTime_ - static_cast<double>(dx) / pixelsPerSecond_
+        );
+
         const int totalContentHeight =
             static_cast<int>(regions_.size()) * (kTrackHeight + kTrackGap);
 
@@ -371,14 +397,6 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
 
         const double maxScroll =
             std::max(0, totalContentHeight - visibleHeight);
-
-        const int dx = e.x - lastDragX_;
-        const int dy = e.y - lastDragY_;
-
-        viewStartTime_ = std::max(
-            0.0,
-            viewStartTime_ - (static_cast<double>(dx) / pixelsPerSecond_)
-        );
 
         verticalScroll_ = std::clamp(
             verticalScroll_ - static_cast<double>(dy),
@@ -390,29 +408,29 @@ void TimelineComponent::mouseDrag(const juce::MouseEvent& e)
         lastDragY_ = e.y;
 
         repaint();
-        return;
     }
 }
 
-
 void TimelineComponent::mouseUp(const juce::MouseEvent& e)
 {
+    juce::ignoreUnused(e);
+
     if (draggingPlayhead_)
     {
         draggingPlayhead_ = false;
+        return;
     }
-    juce::ignoreUnused(e);
 
     isPanningTimeline_ = false;
     isUserPanning_ = false;
 
-    selectedBlock_ = -1;
     dragMode_ = DragMode::None;
 }
 
 void TimelineComponent::mouseDown(const juce::MouseEvent& e)
 {
-     int playheadX = (int) timeToX(currentTime_);
+    grabKeyboardFocus();
+    int playheadX = (int) timeToX(currentTime_);
     if (std::abs(e.x - playheadX) < kPlayheadHitWidth){
         draggingPlayhead_ = true;
         return;
@@ -439,51 +457,91 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& e)
                    + r.trackIndex * (kTrackHeight + kTrackGap)
                    - (int)verticalScroll_;
 
-        int x = timeToX(r.startTime);
-        int width = (int)(r.duration * pixelsPerSecond_);
+        int x = timeToX(r.startTimeSec);
+        int width = (int)(r.durationSec * pixelsPerSecond_);
 
         juce::Rectangle<int> rect(x, trackY, width, kTrackHeight);
 
         if (rect.contains(e.getPosition()))
         {
+            selectedRegion_ = r;
+            hasSelectedRegion_ = true;
+            selectedBlock_ = r.serial;
+            selectedTimeIndex_ = r.timeIndex;
+
             if (onRectRegionClicked)
                 onRectRegionClicked(r.serial);
 
-            selectedBlock_ = r.serial;
+            originalStart_ = r.startTimeSec;
+            originalDuration_ = r.durationSec;
             dragStartTime_ = xToTime(e.x);
-            originalStart_ = r.startTime;
-            originalDuration_ = r.duration;
-
+                
             const int edgeThreshold = 5;
 
             if (std::abs(e.x - rect.getX()) < edgeThreshold)
                 dragMode_ = DragMode::ResizeLeft;
             else if (std::abs(e.x - rect.getRight()) < edgeThreshold)
                 dragMode_ = DragMode::ResizeRight;
-            else
+            else{
                 dragMode_ = DragMode::Move;
+            }
 
+            if (e.mods.isPopupMenu())
+            {
+                juce::PopupMenu menu;
+                menu.addItem(1, "Delete");
+
+                menu.showMenuAsync(
+                    juce::PopupMenu::Options()
+                        .withTargetComponent(this)
+                        .withTargetScreenArea(
+                            localAreaToGlobal(
+                                juce::Rectangle<int>(e.x, e.y, 1, 1)
+                            )
+                        ),
+                    [this, r](int result)
+                    {
+                        if (result == 1)
+                        {
+                            if (onDeleteBlockOrRegion)
+                                onDeleteBlockOrRegion(r.serial, r.timeIndex);
+
+                            hasSelectedRegion_ = false;
+                            selectedBlock_ = -1;
+                            selectedTimeIndex_ = -1;
+                            dragMode_ = DragMode::None;
+
+                            repaint();
+                        }
+                    }
+                );
+
+                return;
+            }
             return;
-        }else{
-            if (onRectRegionClicked)
-                onRectRegionClicked(-1);
-
         }
     }
 
+    // No block/region clicked
+    selectedRegion_ = BlockRegion{};
+    hasSelectedRegion_ = false;
+
     selectedBlock_ = -1;
+    selectedTimeIndex_ = -1;
     dragMode_ = DragMode::None;
 
-    if (selectedBlock_ == -1)
-    {
-        followPlayhead_ = false;
+    if (onRectRegionClicked)
+        onRectRegionClicked(-1);
 
-        isPanningTimeline_ = true;
-        isUserPanning_ = true;
+    followPlayhead_ = false;
 
-        lastDragX_ = e.x;
-        lastDragY_ = e.y;
-    }
+    isPanningTimeline_ = true;
+    isUserPanning_ = true;
+
+    lastDragX_ = e.x;
+    lastDragY_ = e.y;
+
+    repaint();
 }
 
 void TimelineComponent::setCurrentTime(double timeSec)
@@ -548,4 +606,107 @@ void TimelineComponent::setBpm(double newBpm)
 {
     bpm_ = juce::jlimit(40.0, 240.0, newBpm);
     repaint();
+}
+
+int TimelineComponent::yToTrackIndex(int y)
+{
+    int localY = y + (int)verticalScroll_ - kRulerHeight;
+
+    if (localY < 0)
+        return -1;
+
+    int rowHeight = kTrackHeight + kTrackGap;
+    int track = localY / rowHeight;
+
+    int yInsideTrack = localY % rowHeight;
+
+    if (yInsideTrack >= kTrackHeight)
+        return -1;
+
+    return track;
+};
+
+void TimelineComponent::mouseMove(const juce::MouseEvent& e)
+{
+    mouseCursorTime_ = juce::jmax(0.0, xToTime(e.x));
+    mouseTrackIndex_ = yToTrackIndex(e.y);
+}
+
+bool TimelineComponent::keyPressed(const juce::KeyPress& key)
+{
+    const bool isCtrlC =
+        (key.getModifiers().isCommandDown() &&
+        (key.getKeyCode() == 'c' || key.getKeyCode() == 'C'));
+
+    const bool isCtrlV =
+        (key.getModifiers().isCommandDown() &&
+        (key.getKeyCode() == 'v' || key.getKeyCode() == 'V'));
+
+    if (isCtrlC)
+    {
+        if (hasSelectedRegion_)
+            copiedRegion_ = selectedRegion_;
+
+        return true;
+    }
+
+    if (isCtrlV)
+    {
+        if (!copiedRegion_)
+        return true;
+        
+        const auto& copy = *copiedRegion_;
+        if (mouseTrackIndex_ != copy.trackIndex)
+            return true;
+
+        double newStart = juce::jmax(0.0, mouseCursorTime_);
+        double duration = copy.durationSec;
+
+        BlockRegion test = copy;
+        test.startTimeSec = newStart;
+
+        if (!canPlaceRegion(test, newStart, duration))
+            return true;
+
+        if (onRegionDuplicated)
+            onRegionDuplicated(copy.serial, newStart, duration);
+
+        return true;
+    }
+
+    return false;
+}
+
+bool TimelineComponent::canPlaceRegion(const BlockRegion& moving,
+                                       double newStart,
+                                       double newDuration) const
+{
+    if (newStart < 0.0)
+        return false;
+
+    if (newDuration <= 0.05)
+        return false;
+
+    const double newEnd = newStart + newDuration;
+
+    for (const auto& other : regions_)
+    {
+        if (other.trackIndex != moving.trackIndex)
+            continue;
+
+        if (other.serial == moving.serial &&
+            other.timeIndex == moving.timeIndex)
+            continue;
+
+        const double otherStart = other.startTimeSec;
+        const double otherEnd   = other.startTimeSec + other.durationSec;
+
+        const bool overlaps =
+            newStart < otherEnd && newEnd > otherStart;
+
+        if (overlaps)
+            return false;
+    }
+
+    return true;
 }

@@ -10,7 +10,7 @@
 namespace
 {
     static constexpr char     kMagic[4] = { 'S', 'I', 'M', 'E' };
-    static constexpr uint16_t kVersion  = 3;   // bumped from 1: adds loop fields
+    static constexpr uint16_t kVersion  = 4;   // bumped from 1: adds loop fields
 
     // Tiny endian-agnostic helpers (no-op on x86 but keeps intent clear)
     template <typename T>
@@ -54,6 +54,14 @@ bool SceneFile::save(const std::string& path, const std::vector<BlockEntry>& blo
         writeVal<double>(f, b.startTimeSec);
         writeVal<double>(f, b.durationSec);
         writeVal<uint8_t>(f, b.durationLocked ? 1 : 0);
+
+        writeVal<uint32_t>(f, static_cast<uint32_t>(b.timesList.size()));
+
+        for (const auto& t : b.timesList)
+        {
+            writeVal<double>(f, t.startTimeSec);
+            writeVal<double>(f, t.durationSec);
+        }
 
         writeVal<uint8_t>(f, b.hasRecordedMovement ? 1 : 0);
         if (b.hasRecordedMovement)
@@ -149,6 +157,25 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
         uint8_t dl = 0;
         if (!readVal(f, dl)) return false;
         b.durationLocked = (dl != 0);
+        
+        if (version >= 4)
+        {
+            uint32_t timeCount = 0;
+
+            if (!readVal(f, timeCount))
+                return false;
+
+            b.timesList.resize(timeCount);
+
+            for (uint32_t t = 0; t < timeCount; ++t)
+            {
+                if (!readVal(f, b.timesList[t].startTimeSec))
+                    return false;
+
+                if (!readVal(f, b.timesList[t].durationSec))
+                    return false;
+            }
+        }
 
         uint8_t hm = 0;
         if (!readVal(f, hm)) return false;
