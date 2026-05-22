@@ -2,8 +2,137 @@
 #include "MathUtils.h"        // Vec3i — must precede BlockEntry.h
 #include "SequencerEngine.h"
 
-std::vector<SequencerEvent> SequencerEngine::update(const TransportClock&    clock,
-                                                     std::vector<BlockEntry>& blocks)
+static void processOccurrence(BlockEntry& block,
+                              double startTime,
+                              double duration,
+                              bool& hasStarted,
+                              bool& hasFinished,
+                              bool& isPlaying,
+                              int& loopIterationsFired,
+                              std::vector<bool>& triggeredKeyframes,
+                              size_t currentKeyframeIndex,
+                              double now,
+                              std::vector<SequencerEvent>& eventBuffer)
+{
+    const double endTime = startTime + duration;
+
+    // START
+    if (!hasStarted && now >= startTime)
+    {
+        hasStarted = true;
+        isPlaying = true;
+        loopIterationsFired = 1;
+
+        SequencerEvent ev;
+        ev.type           = SequencerEventType::Start;
+        ev.blockSerial    = block.serial;
+        ev.soundId        = block.soundId;
+        ev.triggerTimeSec = now;
+        ev.blockX         = static_cast<float>(block.pos.x);
+        ev.blockY         = static_cast<float>(block.pos.y);
+        ev.blockZ         = static_cast<float>(block.pos.z);
+
+        eventBuffer.push_back(ev);
+    }
+
+    // LOOP RETRIGGER
+    if (block.isLooping &&
+        hasStarted &&
+        !hasFinished &&
+        duration > 0.001)
+    {
+        const double playbackEnd = startTime + block.loopDurationSec;
+        const double relTime = now - startTime;
+
+        const int expectedIterations =
+            static_cast<int>(relTime / duration) + 1;
+
+        while (loopIterationsFired < expectedIterations)
+        {
+            const double iterStart =
+                startTime + loopIterationsFired * duration;
+
+            if (iterStart >= playbackEnd)
+                break;
+
+            SequencerEvent stopEv;
+            stopEv.type           = SequencerEventType::Stop;
+            stopEv.blockSerial    = block.serial;
+            stopEv.soundId        = block.soundId;
+            stopEv.triggerTimeSec = iterStart;
+            eventBuffer.push_back(stopEv);
+
+            SequencerEvent startEv;
+            startEv.type           = SequencerEventType::Start;
+            startEv.blockSerial    = block.serial;
+            startEv.soundId        = block.soundId;
+            startEv.triggerTimeSec = iterStart;
+            startEv.blockX         = static_cast<float>(block.pos.x);
+            startEv.blockY         = static_cast<float>(block.pos.y);
+            startEv.blockZ         = static_cast<float>(block.pos.z);
+            eventBuffer.push_back(startEv);
+
+            ++loopIterationsFired;
+        }
+    }
+
+    // MOVEMENT KEYFRAMES
+    if (block.hasRecordedMovement &&
+        hasStarted &&
+        !hasFinished)
+    {
+        const double relativeTime = now - startTime;
+
+        if (triggeredKeyframes.size() != block.recordedMovement.size())
+            triggeredKeyframes.resize(block.recordedMovement.size(), false);
+
+        for (size_t i = static_cast<size_t>(currentKeyframeIndex);
+             i < block.recordedMovement.size();
+             ++i)
+        {
+            const auto& kf = block.recordedMovement[i];
+
+            if (relativeTime >= kf.timeSec &&
+                !triggeredKeyframes[i])
+            {
+                currentKeyframeIndex = static_cast<int>(i);
+                triggeredKeyframes[i] = true;
+
+                SequencerEvent ev;
+                ev.type           = SequencerEventType::Movement;
+                ev.blockSerial    = block.serial;
+                ev.soundId        = block.soundId;
+                ev.triggerTimeSec = now;
+                ev.blockX         = static_cast<float>(kf.position.x);
+                ev.blockY         = static_cast<float>(kf.position.y);
+                ev.blockZ         = static_cast<float>(kf.position.z);
+
+                eventBuffer.push_back(ev);
+            }
+        }
+    }
+
+    // FINAL STOP
+    if (hasStarted &&
+        !hasFinished &&
+        now >= endTime)
+    {
+        hasFinished = true;
+        isPlaying = false;
+
+        SequencerEvent ev;
+        ev.type           = SequencerEventType::Stop;
+        ev.blockSerial    = block.serial;
+        ev.soundId        = block.soundId;
+        ev.triggerTimeSec = now;
+
+        eventBuffer.push_back(ev);
+    }
+}
+
+
+std::vector<SequencerEvent> SequencerEngine::update(const TransportClock& clock,
+                                                    std::vector<BlockEntry>& blocks)
 {
     eventBuffer_.clear();
 
@@ -17,120 +146,39 @@ std::vector<SequencerEvent> SequencerEngine::update(const TransportClock&    clo
         if (block.soundId < 0)
             continue;
 
-        // ── Start (first hit) ─────────────────────────────────────────────────
-        if (!block.hasStarted && now >= block.startTimeSec)
+        // Original/default region
+        processOccurrence(block,
+                          block.startTimeSec,
+                          block.durationSec,
+                          block.hasStarted,
+                          block.hasFinished,
+                          block.isPlaying,
+                          block.loopIterationsFired,
+                          block.triggeredKeyframes,
+                          block.currentKeyframeIndex,
+                          now,
+                          eventBuffer_);
+
+        // Copied/pasted regions
+        for (auto& t : block.timesList)
         {
-            block.hasStarted = true;
-            block.isPlaying  = true;
-            block.loopIterationsFired = 1;
-
-            SequencerEvent ev;
-            ev.type           = SequencerEventType::Start;
-            ev.blockSerial    = block.serial;
-            ev.soundId        = block.soundId;
-            ev.triggerTimeSec = now;
-            ev.blockX         = static_cast<float>(block.pos.x);
-            ev.blockY         = static_cast<float>(block.pos.y);
-            ev.blockZ         = static_cast<float>(block.pos.z);
-            eventBuffer_.push_back(ev);
-        }
-
-        // ── Loop retrigger ───────────────────────────────────────────────────
-        // For looping blocks, fire Stop+Start every durationSec until the
-        // would-be retrigger time runs past (startTimeSec + loopDurationSec).
-        if (block.isLooping && block.hasStarted && !block.hasFinished
-            && block.durationSec > 0.001)
-        {
-            const double playbackEnd = block.startTimeSec + block.loopDurationSec;
-            const double relTime     = now - block.startTimeSec;
-            const int    expected    = static_cast<int>(relTime / block.durationSec) + 1;
-
-            while (block.loopIterationsFired < expected)
-            {
-                const double iterStart =
-                    block.startTimeSec
-                    + block.loopIterationsFired * block.durationSec;
-
-                if (iterStart >= playbackEnd)
-                    break;   // would start after the loop window closes
-
-                // Stop the previous iteration cleanly
-                {
-                    SequencerEvent stopEv;
-                    stopEv.type           = SequencerEventType::Stop;
-                    stopEv.blockSerial    = block.serial;
-                    stopEv.soundId        = block.soundId;
-                    stopEv.triggerTimeSec = iterStart;
-                    eventBuffer_.push_back(stopEv);
-                }
-
-                // Start the next iteration
-                {
-                    SequencerEvent startEv;
-                    startEv.type           = SequencerEventType::Start;
-                    startEv.blockSerial    = block.serial;
-                    startEv.soundId        = block.soundId;
-                    startEv.triggerTimeSec = iterStart;
-                    startEv.blockX         = static_cast<float>(block.pos.x);
-                    startEv.blockY         = static_cast<float>(block.pos.y);
-                    startEv.blockZ         = static_cast<float>(block.pos.z);
-                    eventBuffer_.push_back(startEv);
-                }
-
-                block.loopIterationsFired++;
-            }
-        }
-
-        // ── Movement keyframes ────────────────────────────────────────────────
-        if (block.hasRecordedMovement && block.hasStarted && !block.hasFinished)
-        {
-            double relativeTime = now - block.startTimeSec;
-
-            if (block.triggeredKeyframes.size() != block.recordedMovement.size())
-            {
-                block.triggeredKeyframes.resize(block.recordedMovement.size(), false);
-            }
-            
-            for (size_t i = block.currentKeyframeIndex; i < block.recordedMovement.size(); ++i)
-            {
-                const auto& kf = block.recordedMovement[i];
-                
-                if (relativeTime >= kf.timeSec && !block.triggeredKeyframes[i])
-                {
-                    block.currentKeyframeIndex = i;
-                    block.triggeredKeyframes[i] = true;
-                    
-                    // Create movement event
-                    SequencerEvent ev;
-                    ev.type           = SequencerEventType::Movement;  // New event type!
-                    ev.blockSerial    = block.serial;
-                    ev.soundId        = block.soundId;
-                    ev.triggerTimeSec = now;
-                    ev.blockX         = static_cast<float>(kf.position.x);
-                    ev.blockY         = static_cast<float>(kf.position.y);
-                    ev.blockZ         = static_cast<float>(kf.position.z);
-                    eventBuffer_.push_back(ev);
-                }
-            }
-        }
-
-        // ── Stop (final) ──────────────────────────────────────────────────────
-        if (block.hasStarted && !block.hasFinished && now >= block.endTimeSec())
-        {
-            block.hasFinished = true;
-            block.isPlaying   = false;
-
-            SequencerEvent ev;
-            ev.type           = SequencerEventType::Stop;
-            ev.blockSerial    = block.serial;
-            ev.soundId        = block.soundId;
-            ev.triggerTimeSec = now;
-            eventBuffer_.push_back(ev);
+            processOccurrence(block,
+                              t.startTimeSec,
+                              t.durationSec,
+                              t.hasStarted,
+                              t.hasFinished,
+                              t.isPlaying,
+                              t.loopIterationsFired,
+                              t.triggeredKeyframes,
+                              t.currentKeyframeIndex,
+                              now,
+                              eventBuffer_);
         }
     }
 
     return eventBuffer_;
 }
+
 
 void SequencerEngine::updateBlockMovement(std::vector<BlockEntry>& blocks, 
                                           double currentTime)
@@ -173,6 +221,11 @@ void SequencerEngine::updateBlockMovement(std::vector<BlockEntry>& blocks,
 
 void SequencerEngine::resetAllBlocks(std::vector<BlockEntry>& blocks) noexcept
 {
-    for (auto& b : blocks)
-        b.resetPlaybackState();
+    for (auto& block : blocks)
+    {
+        block.resetPlaybackState();
+
+        for (auto& t : block.timesList)
+            t.resetPlaybackState();
+    }
 }

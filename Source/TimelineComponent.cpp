@@ -213,13 +213,36 @@ void TimelineComponent::paintTracks(juce::Graphics& g, juce::Rectangle<int> area
         juce::Rectangle<int> blockRect(x, y, w, h);
         
         // Block color
-        juce::Colour color = juce::Colour::fromFloatRGBA(region.color.x, region.color.y, region.color.z, 1.0f);
-        g.setColour(color.withAlpha(0.9f));
+        juce::Colour baseColor = juce::Colour::fromFloatRGBA(
+            region.color.x,
+            region.color.y,
+            region.color.z,
+            1.0f
+        );
+
+        bool isSelected = false;
+
+        if (hasSelectedRegion_)
+        {
+            isSelected =
+                region.serial == selectedRegion_.serial &&
+                region.timeIndex == selectedRegion_.timeIndex;
+        }
+
+        juce::Colour fillColor = isSelected
+            ? baseColor.interpolatedWith(juce::Colours::white, 0.35f)
+            : baseColor;
+
+        g.setColour(fillColor.withAlpha(0.9f));
         g.fillRoundedRectangle(blockRect.toFloat(), 3.0f);
-        
+
         // Border
-        g.setColour(color.brighter(0.3f));
-        g.drawRoundedRectangle(blockRect.toFloat(), 3.0f, 1.5f);
+        juce::Colour borderColor = isSelected
+            ? baseColor.interpolatedWith(juce::Colours::white, 0.7f)
+            : baseColor.brighter(0.3f);
+
+        g.setColour(borderColor);
+        g.drawRoundedRectangle(blockRect.toFloat(), 3.0f, isSelected ? 2.5f : 1.5f);
         
         // Label
         if (w > 50) // Only show label if wide enough
@@ -462,6 +485,42 @@ void TimelineComponent::mouseDown(const juce::MouseEvent& e)
             else{
                 dragMode_ = DragMode::Move;
             }
+
+            if (e.mods.isPopupMenu())
+            {
+                juce::PopupMenu menu;
+                menu.addItem(1, "Delete");
+
+                menu.showMenuAsync(
+                    juce::PopupMenu::Options()
+                        .withTargetComponent(this)
+                        .withTargetScreenArea(
+                            localAreaToGlobal(
+                                juce::Rectangle<int>(e.x, e.y, 1, 1)
+                            )
+                        ),
+                    [this, r](int result)
+                    {
+                        if (result == 1)
+                        {
+                            if (onDeleteBlockOrRegion)
+                                onDeleteBlockOrRegion(r.serial, r.timeIndex);
+
+                            hasSelectedRegion_ = false;
+                            selectedBlock_ = -1;
+                            selectedTimeIndex_ = -1;
+                            dragMode_ = DragMode::None;
+
+                            repaint();
+                        }
+                    }
+                );
+
+                return;
+            }
+
+
+            
 
             return;
         }

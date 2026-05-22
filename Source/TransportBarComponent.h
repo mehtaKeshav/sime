@@ -54,6 +54,7 @@ public:
     std::function<void(int serial, int timeIndex,
                     double start, double duration)> onRegionEdited;
 
+    std::function<void(int serial, int timeIndex)> onDeleteBlockOrRegion;
     
 
 private:

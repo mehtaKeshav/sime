@@ -174,8 +174,12 @@ public:
     {
         juce::ScopedLock lock(blockListSnapshotMutex_);
         double maxEnd = 0.0;
-        for (const auto& b : blockListSnapshot_)
+        for (const auto& b : blockListSnapshot_){
             maxEnd = std::max(maxEnd, b.endTimeSec());
+            for (const auto& t : b.timesList){
+                maxEnd = std::max(maxEnd, t.endTimeSec());
+            }
+        }
         return maxEnd;
     }
 
@@ -237,6 +241,8 @@ public:
     const std::vector<BlockEntry>& getBlocks() const{
         return blockList;
     }
+
+    bool deleteBlockOrRegion(int serial, int timeIndex);
 
    
 

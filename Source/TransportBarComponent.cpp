@@ -98,6 +98,13 @@ TransportBarComponent::TransportBarComponent()
         if (onRegionEdited)
             onRegionEdited(serial, timeIndex, start, duration);
     };
+    timeline.onDeleteBlockOrRegion = [this](int serial, int timeIndex)
+    {
+        if (onDeleteBlockOrRegion)
+            onDeleteBlockOrRegion(serial, timeIndex);
+    };
+
+     // ── Sidebar callbacks ─────────────────────────────────────────────────────
 
     // ── Collapse button ───────────────────────────────────────────────────────
     // ▲ = \xe2\x96\xb2  (U+25B2)   ▼ = \xe2\x96\xbc  (U+25BC)

@@ -31,9 +31,28 @@ struct TimeRange
     double startTimeSec = 0.0;
     double durationSec  = 1.0;
 
+    bool hasStarted  = false;
+    bool hasFinished = false;
+    bool isPlaying   = false;
+
+    int currentKeyframeIndex = 0;
+    int loopIterationsFired  = 0;
+
+    std::vector<bool> triggeredKeyframes;
+
     double endTimeSec() const
     {
         return startTimeSec + durationSec;
+    }
+
+    void resetPlaybackState()
+    {
+        hasStarted = false;
+        hasFinished = false;
+        isPlaying = false;
+        currentKeyframeIndex = 0;
+        loopIterationsFired = 0;
+        triggeredKeyframes.clear();
     }
 };
 
