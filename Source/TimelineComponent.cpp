@@ -13,17 +13,19 @@ void TimelineComponent::setBlocks(const std::vector<BlockEntry>& blocks)
 
     for (const auto& b : blocks)
     {
-        regions_.push_back({ 
+        const juce::String name = BlockEntry::displayName(b, blocks);
+
+        regions_.push_back({
                 b.serial,
                 -1,
                 b.blockType,
                 b.startTimeSec,
                 b.durationSec,
                 trackIndex,
-                juce::String(b.serial),
+                name,
                 b.colour
             });
-        
+
 
         for (int i = 0; i < (int)b.timesList.size(); ++i)
         {
@@ -35,7 +37,7 @@ void TimelineComponent::setBlocks(const std::vector<BlockEntry>& blocks)
                 t.startTimeSec,
                 t.durationSec,
                 trackIndex,
-                juce::String(b.serial) + " | " + juce::String(trackIndex),
+                name + " | " + juce::String(i + 1),
                 b.colour
             });
         }

@@ -290,7 +290,11 @@ void SidebarComponent::paint(juce::Graphics& g)
 
             const auto& e = snapshot[i];
 
-            juce::String row = "Block " + juce::String(e.serial)
+            const juce::String name = e.displayName.isNotEmpty()
+                ? e.displayName
+                : juce::String("Block ") + juce::String(e.serial);
+
+            juce::String row = name
                              + "  (" + juce::String(e.pos.x)
                              + ", "  + juce::String(e.pos.y)
                              + ", "  + juce::String(e.pos.z) + ")";
@@ -327,7 +331,12 @@ void SidebarComponent::paint(juce::Graphics& g)
 
         g.setFont(juce::Font("Public Sans", 16.0f, juce::Font::bold));
         g.setColour(juce::Colour(0xff88aacc));
-        g.drawText("Block " + juce::String(selectedBlock_->serial),
+
+        const juce::String headerName = selectedDisplayName_.isNotEmpty()
+            ? selectedDisplayName_
+            : juce::String("Block ") + juce::String(selectedBlock_->serial);
+
+        g.drawText(headerName,
                    margin, contentTopY,
                    getWidth() - 2 * margin, 26,
                    juce::Justification::centredLeft);
@@ -367,10 +376,12 @@ void SidebarComponent::paint(juce::Graphics& g)
 }
 
 
-void SidebarComponent::showBlockInfo(const BlockEntry& block)
+void SidebarComponent::showBlockInfo(const BlockEntry& block,
+                                     const juce::String& displayName)
 {
-    selectedBlock_ = block;
-    originalBlock_ = block;
+    selectedBlock_       = block;
+    originalBlock_       = block;
+    selectedDisplayName_ = displayName;
 
     blockPanelOpen = false;
     infoPanelOpen = true;
@@ -389,6 +400,32 @@ void SidebarComponent::showBlockInfo(const BlockEntry& block)
 
     resized();
     repaint();
+}
+
+void SidebarComponent::clearSelectedBlock()
+{
+    selectedBlock_.reset();
+    originalBlock_.reset();
+    selectedDisplayName_.clear();
+
+    // Hide the editors so they don't keep showing stale text
+    xEditor.setText({}, juce::dontSendNotification);
+    yEditor.setText({}, juce::dontSendNotification);
+    zEditor.setText({}, juce::dontSendNotification);
+    startEditor.setText({}, juce::dontSendNotification);
+    durationEditor.setText({}, juce::dontSendNotification);
+    movementEnabledToggle.setToggleState(false, juce::dontSendNotification);
+
+    resized();
+    repaint();
+}
+
+void SidebarComponent::clearSelectedBlockIfSerial(int serial)
+{
+    if (!selectedBlock_ || selectedBlock_->serial != serial)
+        return;
+
+    clearSelectedBlock();
 }
 
 void SidebarComponent::movementGraph(juce::Graphics& g,

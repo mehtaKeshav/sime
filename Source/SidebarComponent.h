@@ -10,8 +10,9 @@ class SidebarComponent : public juce::Component
 public:
     struct Block
     {
-        int serial;
-        Vec3i pos;
+        int          serial;
+        Vec3i        pos;
+        juce::String displayName;   ///< e.g. "Violin 1" — empty falls back to "Block N"
     };
 
     SidebarComponent();
@@ -32,7 +33,17 @@ public:
     bool isBlockPanelOpen() const { return blockPanelOpen; }
     bool isInfoPanelOpen() const { return infoPanelOpen; }
 
-    void showBlockInfo(const BlockEntry& block);
+    void showBlockInfo(const BlockEntry& block, const juce::String& displayName = {});
+
+    /// Drop the currently shown block info (used when the scene is cleared
+    /// or a new scene is loaded — otherwise stale info from the previous
+    /// scene keeps showing in the Info panel).
+    void clearSelectedBlock();
+
+    /// Clear the info panel only when it is showing this serial (e.g. block
+    /// was deleted from the viewport or timeline).
+    void clearSelectedBlockIfSerial(int serial);
+
     std::function<void(
         int serial,
         Vec3i newPos,
@@ -58,6 +69,7 @@ private:
 
     std::optional<BlockEntry> selectedBlock_;
     std::optional<BlockEntry> originalBlock_;
+    juce::String              selectedDisplayName_;
 
     juce::TextEditor xEditor;
     juce::TextEditor yEditor;

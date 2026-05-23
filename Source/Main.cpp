@@ -23,17 +23,12 @@ public:
         mainComponent = mc;
         mainWindow.reset(new MainWindow("SIME", mc, *this));
 
-        // Auto-load last session if an autosave exists
-        auto autosave = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                            .getChildFile("SIME").getChildFile("autosave.sime");
-        if (autosave.existsAsFile())
-        {
-            // Defer so the GL context has time to initialize
-            juce::MessageManager::callAsync([mc, path = autosave.getFullPathName()]()
-            {
-                mc->loadSceneFromFile(path);
-            });
-        }
+        // NOTE: we deliberately do NOT auto-load the autosave here.  The startup
+        // menu already shows an explicit "Continue autosave.sime" button so the
+        // user can opt in.  Loading silently here caused a persistence bug
+        // where clicking "New Scene" on the startup menu would clear the
+        // viewport, then the async autoload would fire a frame later and
+        // re-populate it with the previous session's blocks.
     }
 
     void shutdown() override

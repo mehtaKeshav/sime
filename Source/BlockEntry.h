@@ -19,6 +19,7 @@
 #include "MathUtils.h"
 #include "BlockType.h"
 #include <string>
+#include <vector>
 
 struct MovementKeyFrame
 {
@@ -144,6 +145,34 @@ struct BlockEntry
         {
             triggeredKeyframes.resize(recordedMovement.size(), false);
         }
+    }
+
+    /// User-facing display name like "Violin 1", "Piano 3".
+    ///
+    /// The number is the 1-based position of this block in the list of all
+    /// blocks of the *same type* (preserving insertion order).  This is what
+    /// the user sees in the sidebar / timeline / info panel; the internal
+    /// `serial` field is still the stable unique ID used by the sequencer.
+    ///
+    /// Deletion automatically renumbers, because we recompute from the
+    /// current vector every time the list is rebuilt.
+    static juce::String displayName(const BlockEntry& block,
+                                    const std::vector<BlockEntry>& allBlocks)
+    {
+        int ordinal = 0;
+        for (const auto& b : allBlocks)
+        {
+            if (b.blockType == block.blockType)
+            {
+                ++ordinal;
+                if (b.serial == block.serial)
+                    break;
+            }
+        }
+        if (ordinal == 0) ordinal = 1;   // fallback if not found
+
+        return juce::String(blockTypeDisplayName(block.blockType))
+             + " " + juce::String(ordinal);
     }
 
     static Vec3f getBlockColor(BlockType type, int soundId)

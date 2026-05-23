@@ -212,11 +212,20 @@ void ViewPortComponent::renderOpenGL()
     {
         voxelGrid.clear();
         blockList.clear();
-        renderer.meshDirty = true;
+        nextSerial            = 1;        // start fresh so new blocks begin at 1
+        selectedSerial          = -1;
+        highlightedBlockSerial_ = -1;
+        hoveredBlockSerial_     = -1;
+        recordingBlockSerial    = -1;
+        renderer.meshDirty      = true;
+
         juce::MessageManager::callAsync([this]()
         {
             if (sidebar != nullptr)
+            {
                 sidebar->setBlocks({});
+                sidebar->clearSelectedBlock();
+            }
             if (onBlockListChanged)
                 onBlockListChanged();
         });
@@ -249,7 +258,7 @@ void ViewPortComponent::renderOpenGL()
         std::vector<SidebarComponent::Block> uiBlocks;
         uiBlocks.reserve(blockList.size());
         for (const auto& e : blockList)
-            uiBlocks.push_back({ e.serial, e.pos });
+            uiBlocks.push_back({ e.serial, e.pos, BlockEntry::displayName(e, blockList) });
 
         juce::MessageManager::callAsync([this, uiBlocks]()
         {
@@ -274,6 +283,7 @@ void ViewPortComponent::renderOpenGL()
     // ── Drain Delete/Backspace ops ────────────────────────────────────────────
     {
         juce::ScopedLock lock(opsMutex);
+        int lastRemovedSerial = -1;
         bool changed = !pendingOps.empty();
         for (auto& op : pendingOps)
         {
@@ -282,26 +292,21 @@ void ViewPortComponent::renderOpenGL()
                 voxelGrid.remove(op.pos);
                 auto it = std::find_if(blockList.begin(), blockList.end(),
                     [&](const BlockEntry& e){ return e.pos == op.pos; });
-                if (it != blockList.end()) blockList.erase(it);
+                if (it != blockList.end())
+                {
+                    lastRemovedSerial = it->serial;
+                    if (highlightedBlockSerial_ == lastRemovedSerial)
+                        highlightedBlockSerial_ = -1;
+                    if (selectedSerial == lastRemovedSerial)
+                        selectedSerial = -1;
+                    blockList.erase(it);
+                }
                 renderer.meshDirty = true;
             }
         }
         pendingOps.clear();
-        if (changed) {
-            std::vector<SidebarComponent::Block> uiBlocks;
-            uiBlocks.reserve(blockList.size());
-
-            for (const auto& e : blockList)
-                uiBlocks.push_back({ e.serial, e.pos });
-
-            juce::MessageManager::callAsync([this, uiBlocks]()
-            {
-                if (sidebar != nullptr)
-                    sidebar->setBlocks(uiBlocks);
-                if (onBlockListChanged)
-                    onBlockListChanged();
-            });
-        }
+        if (changed)
+            pushBlockListToUi(lastRemovedSerial);
     }
 
     // ── Handle pending place / remove clicks ──────────────────────────────────
@@ -547,16 +552,15 @@ void ViewPortComponent::renderOpenGL()
                     {
                         if (b.pos == eHit.voxelPos)
                         {
-                            selectedSerial = b.serial;
-                            dragStartPos   = b.pos;
-                            int ser = b.serial;
-                            if (onBlockSelected)
+                            selectedSerial          = b.serial;
+                            highlightedBlockSerial_ = b.serial;
+                            dragStartPos            = b.pos;
+                            const int ser = b.serial;
+                            juce::MessageManager::callAsync([this, ser]()
                             {
-                                juce::MessageManager::callAsync([this, ser]()
-                                {
-                                    if (onBlockSelected) onBlockSelected(ser);
-                                });
-                            }
+                                if (onBlockSelected)
+                                    onBlockSelected(ser);
+                            });
                             break;
                         }
                     }
@@ -700,22 +704,15 @@ void ViewPortComponent::renderOpenGL()
 
         if (it != blockList.end())
         {
+            const int removedSerial = it->serial;
             voxelGrid.remove(it->pos);
             blockList.erase(it);
+            if (highlightedBlockSerial_ == removedSerial)
+                highlightedBlockSerial_ = -1;
+            if (selectedSerial == removedSerial)
+                selectedSerial = -1;
             renderer.meshDirty = true;
-
-            std::vector<SidebarComponent::Block> uiBlocks;
-            uiBlocks.reserve(blockList.size());
-            for (const auto& e : blockList)
-                uiBlocks.push_back({ e.serial, e.pos });
-
-            juce::MessageManager::callAsync([this, uiBlocks]()
-            {
-                if (sidebar != nullptr)
-                    sidebar->setBlocks(uiBlocks);
-                if (onBlockListChanged)
-                    onBlockListChanged();
-            });
+            pushBlockListToUi(removedSerial);
         }
     }
 
@@ -758,8 +755,28 @@ void ViewPortComponent::renderOpenGL()
             RaycastResult hit = Raycaster::cast(origin, rayDir, voxelGrid);
             if (hit.hit)
             {
-                placePos = Raycaster::getPlacementPos(hit);
-                valid    = (placePos.y >= 0);
+                bool clickedExistingBlock = false;
+                for (const auto& b : blockList)
+                {
+                    if (b.pos == hit.voxelPos)
+                    {
+                        clickedExistingBlock = true;
+                        highlightedBlockSerial_ = b.serial;
+                        const int ser = b.serial;
+                        juce::MessageManager::callAsync([this, ser]()
+                        {
+                            if (onBlockSelected)
+                                onBlockSelected(ser);
+                        });
+                        break;
+                    }
+                }
+
+                if (!clickedExistingBlock)
+                {
+                    placePos = Raycaster::getPlacementPos(hit);
+                    valid    = (placePos.y >= 0);
+                }
             }
             else
             {
@@ -821,7 +838,7 @@ void ViewPortComponent::renderOpenGL()
             uiBlocks.reserve(blockList.size());
 
             for (const auto& e : blockList)
-                uiBlocks.push_back({ e.serial, e.pos });
+                uiBlocks.push_back({ e.serial, e.pos, BlockEntry::displayName(e, blockList) });
 
             juce::MessageManager::callAsync([this, uiBlocks]()
             {
@@ -848,21 +865,17 @@ void ViewPortComponent::renderOpenGL()
             voxelGrid.remove(hit.voxelPos);
             auto it = std::find_if(blockList.begin(), blockList.end(),
                 [&](const BlockEntry& e){ return e.pos == hit.voxelPos; });
-            if (it != blockList.end()) blockList.erase(it);
-            renderer.meshDirty = true;
-            std::vector<SidebarComponent::Block> uiBlocks;
-            uiBlocks.reserve(blockList.size());
-
-            for (const auto& e : blockList)
-                uiBlocks.push_back({ e.serial, e.pos });
-
-            juce::MessageManager::callAsync([this, uiBlocks]()
+            if (it != blockList.end())
             {
-                if (sidebar != nullptr)
-                    sidebar->setBlocks(uiBlocks);
-                if (onBlockListChanged)
-                    onBlockListChanged();
-            });
+                const int removedSerial = it->serial;
+                blockList.erase(it);
+                if (highlightedBlockSerial_ == removedSerial)
+                    highlightedBlockSerial_ = -1;
+                if (selectedSerial == removedSerial)
+                    selectedSerial = -1;
+                renderer.meshDirty = true;
+                pushBlockListToUi(removedSerial);
+            }
         }
     }
 
@@ -1019,38 +1032,70 @@ void ViewPortComponent::renderOpenGL()
     }
     else
     {
-        // Yellow: targeted voxel (hover for removal)
-        if (hasHit && currentHit.hit)
-            renderer.renderHighlight(vp, currentHit.voxelPos,
-                                     Vec3f{ 1.f, 0.85f, 0.1f });
+        const bool hoveringBlock = hoveredBlockSerial_ >= 0;
 
-        // Green: placement preview — always visible whenever the cursor points at
-        // something. We show it on the adjacent face of the hit block even if that
-        // face is already occupied, so the outline never disappears mid-scene.
-        Vec3i placePos;
-        bool  validPlace = false;
-        if (hasHit && currentHit.hit)
+        if (!hoveringBlock)
         {
-            placePos   = Raycaster::getPlacementPos(currentHit);
-            validPlace = (placePos.y >= 0) && isInBounds(placePos);
+            // Yellow: empty voxel / ground under cursor (Backspace removal target)
+            if (hasHit && currentHit.hit)
+                renderer.renderHighlight(vp, currentHit.voxelPos,
+                                         Vec3f{ 1.f, 0.85f, 0.1f });
+
+            // Green: placement preview on the adjacent face
+            Vec3i placePos;
+            bool  validPlace = false;
+            if (hasHit && currentHit.hit)
+            {
+                placePos   = Raycaster::getPlacementPos(currentHit);
+                validPlace = (placePos.y >= 0) && isInBounds(placePos);
+            }
+            else
+            {
+                Vec3i gp = Raycaster::groundPlaneHit(camera.getPosition(), currentRayDir);
+                if (gp != Vec3i{}) { placePos = gp; validPlace = (placePos.y >= 0) && isInBounds(placePos); }
+            }
+
+            if (validPlace && !voxelGrid.contains(placePos)
+                && !(placePos.x == 0 && placePos.y == 0 && placePos.z == 0))
+            {
+                renderer.renderHighlight(vp, placePos, Vec3f{ 0.2f, 1.f, 0.3f });
+            }
         }
         else
         {
-            Vec3i gp = Raycaster::groundPlaneHit(camera.getPosition(), currentRayDir);
-            if (gp != Vec3i{}) { placePos = gp; validPlace = (placePos.y >= 0) && isInBounds(placePos); }
+            // Green: block under cursor (hover to select)
+            for (const auto& b : blockList)
+            {
+                if (b.serial == hoveredBlockSerial_)
+                {
+                    renderer.renderHighlight(vp, b.pos, Vec3f{ 0.2f, 1.f, 0.3f });
+                    break;
+                }
+            }
         }
 
-        if (validPlace && !voxelGrid.contains(placePos) && !(placePos.x == 0 && placePos.y == 0 && placePos.z == 0))
+        // Green: selected block (viewport or timeline click)
+        if (highlightedBlockSerial_ >= 0)
         {
-            renderer.renderHighlight(vp, placePos, Vec3f{ 0.2f, 1.f, 0.3f });
+            for (const auto& b : blockList)
+            {
+                if (b.serial == highlightedBlockSerial_)
+                {
+                    const Vec3f selCol = hoveringBlock && b.serial == hoveredBlockSerial_
+                        ? Vec3f{ 0.35f, 1.f, 0.45f }
+                        : Vec3f{ 0.15f, 0.95f, 0.25f };
+                    renderer.renderHighlight(vp, b.pos, selCol);
+                    break;
+                }
+            }
         }
-        for (const auto& b : blockList){
+
+        // Brighter green while a block is actively playing
+        for (const auto& b : blockList)
+        {
             if (b.isPlaying)
                 renderer.renderHighlight(vp, b.pos, Vec3f{ 0.f, 1.f, 0.3f });
-            else if(b.serial == highlightedBlockSerial_)
-                renderer.renderHighlight(vp, b.pos, Vec3f{ 1.f, 0.85f, 0.1f });
         }
-            
     }
     
     
@@ -1251,6 +1296,39 @@ void ViewPortComponent::doRaycast(float mx, float my)
     currentHit    = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
     hasHit        = currentHit.hit;
     currentRayDir = rayDir;
+
+    hoveredBlockSerial_ = -1;
+    if (currentHit.hit)
+    {
+        for (const auto& b : blockList)
+        {
+            if (b.pos == currentHit.voxelPos)
+            {
+                hoveredBlockSerial_ = b.serial;
+                break;
+            }
+        }
+    }
+}
+
+void ViewPortComponent::pushBlockListToUi(int removedSerial)
+{
+    std::vector<SidebarComponent::Block> uiBlocks;
+    uiBlocks.reserve(blockList.size());
+    for (const auto& e : blockList)
+        uiBlocks.push_back({ e.serial, e.pos, BlockEntry::displayName(e, blockList) });
+
+    juce::MessageManager::callAsync([this, uiBlocks, removedSerial]()
+    {
+        if (sidebar != nullptr)
+        {
+            sidebar->setBlocks(uiBlocks);
+            if (removedSerial >= 0)
+                sidebar->clearSelectedBlockIfSerial(removedSerial);
+        }
+        if (onBlockListChanged)
+            onBlockListChanged();
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1704,36 +1782,12 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
             return;  // never place a block in edit mode
         }
 
-        // Normal mode LMB: queue placement for the GL thread.
-        // Also fire onBlockSelected if the ray hits an existing block (sidebar highlight).
+        // Normal mode LMB: queue for the GL thread.  If the ray hits an existing
+        // block, the GL thread selects it instead of placing a new voxel.
         {
-            const int   w = getWidth(), h = getHeight();
-            const float aspect = (h > 0) ? (float)w / h : 1.f;
-            const Mat4  view_  = camera.getViewMatrix();
-            const Mat4  proj   = camera.getProjectionMatrix(aspect);
-            Vec3f rayDir = Raycaster::screenToRay(e.position.x, e.position.y,
-                                                  (float)w, (float)h, view_, proj);
-            RaycastResult hit = Raycaster::cast(camera.getPosition(), rayDir, voxelGrid);
-
-            if (hit.hit)
-            {
-                for (const auto& b : blockList)
-                {
-                    if (b.pos == hit.voxelPos)
-                    {
-                        if (onBlockSelected)
-                            onBlockSelected(b.serial);
-                    }
-                }
-            }
-
-            // Always queue — the GL thread does its own fresh raycast to compute
-            // the correct adjacent face position, so this is always safe.
-            {
-                juce::ScopedLock lock(clickMutex);
-                pendingPlace = { true, e.position.x, e.position.y,
-                                 e.mods.isShiftDown() };
-            }
+            juce::ScopedLock lock(clickMutex);
+            pendingPlace = { true, e.position.x, e.position.y,
+                             e.mods.isShiftDown() };
         }
     }
 }
@@ -2134,22 +2188,26 @@ bool ViewPortComponent::deleteBlockOrRegion(int serial, int timeIndex)
                        {
                            return b.serial == serial;
                        });
-    if(it != blockList.end())
+    if (it != blockList.end())
     {
         if (timeIndex >= 0 && timeIndex < static_cast<int>(it->timesList.size()))
         {
             it->timesList.erase(it->timesList.begin() + timeIndex);
-            repaint();  
+            repaint();
             return true;
         }
-        else{
-             voxelGrid.remove(it->pos);
-             blockList.erase(it);
-             repaint();
-             return true; 
-        }
 
+        const int removedSerial = it->serial;
+        voxelGrid.remove(it->pos);
+        blockList.erase(it);
+        if (highlightedBlockSerial_ == removedSerial)
+            highlightedBlockSerial_ = -1;
+        if (selectedSerial == removedSerial)
+            selectedSerial = -1;
+        renderer.meshDirty = true;
+        pushBlockListToUi(removedSerial);
+        repaint();
+        return true;
     }
     return false;
-    
 }

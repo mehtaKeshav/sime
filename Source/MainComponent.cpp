@@ -51,7 +51,7 @@ MainComponent::MainComponent()
     {
         auto block = view.getBlockBySerial(serial);
         if (block)
-            sidebar.showBlockInfo(*block);
+            sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
     };
 
     // Update the transport bar immediately when blocks are added / removed / loaded,
@@ -108,7 +108,7 @@ MainComponent::MainComponent()
         transportBar.setBlocks(view.getBlocks());
         auto block = view.getBlockBySerial(serial);
         if (block)
-            sidebar.showBlockInfo(*block); 
+            sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
         timerCallback();  // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
         markDirty();                      
     };
@@ -119,7 +119,7 @@ MainComponent::MainComponent()
         if (deleted)
         {
             transportBar.setBlocks(view.getBlocks());
-            sidebar.showBlockInfo(BlockEntry{}); // Clear sidebar
+            sidebar.clearSelectedBlockIfSerial(serial);
             timerCallback(); // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
             markDirty();
         }
@@ -132,7 +132,7 @@ MainComponent::MainComponent()
         transportBar.setBlocks(view.getBlocks());
         
         if (auto block = view.getBlockBySerial(serial))
-            sidebar.showBlockInfo(*block);
+            sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
         timerCallback(); // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
         markDirty();  
     };
@@ -143,7 +143,7 @@ MainComponent::MainComponent()
         transportBar.setBlocks(view.getBlocks());
         
         if (auto block = view.getBlockBySerial(serial))
-            sidebar.showBlockInfo(*block);
+            sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
         timerCallback();  // Force transport time display to update immediately, since we're changing block timing outside of the regular timer tick.
         markDirty();
     };
@@ -152,7 +152,7 @@ MainComponent::MainComponent()
         view.highlightBlock(serial);
         auto block = view.getBlockBySerial(serial);
         if (block)
-            sidebar.showBlockInfo(*block);
+            sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
 
     };
     transportBar.onPlayheadMoved = [this](double newTimeSec)
@@ -169,7 +169,7 @@ MainComponent::MainComponent()
 
         auto updated = view.getBlockBySerial(serial);
         if (updated)
-            sidebar.showBlockInfo(*updated);
+            sidebar.showBlockInfo(*updated, view.displayNameForSerial(serial));
 
         transportBar.setBlocks(view.getBlockListCopy());
         markDirty();
@@ -560,6 +560,7 @@ void MainComponent::newScene()
     hasUnsavedChanges_ = false;
     currentFilePath_.clear();
     view.clearScene();
+    sidebar.clearSelectedBlock();   // drop stale info from the previous scene
     updateWindowTitle();
 }
 
@@ -628,6 +629,7 @@ void MainComponent::openScene()
                 suppressNextDirty_ = true;
                 hasUnsavedChanges_ = false;
                 view.loadScene(std::move(loaded));
+                sidebar.clearSelectedBlock();   // drop stale info from the previous scene
                 currentFilePath_ = path;
                 updateWindowTitle();
                 DBG("Scene loaded: " << path << "  (" << (int)view.getBlockListCopy().size() << " blocks)");
@@ -662,6 +664,7 @@ void MainComponent::loadSceneFromFile(const juce::String& path)
         suppressNextDirty_ = true;   // the upcoming load won't mark the scene dirty
         hasUnsavedChanges_ = false;
         view.loadScene(std::move(loaded));
+        sidebar.clearSelectedBlock();   // previous-scene selection is no longer valid
         currentFilePath_ = path;
         updateWindowTitle();
     }

@@ -219,8 +219,30 @@ public:
     /// Replace the entire scene with loaded blocks (called from message thread).
     void loadScene(std::vector<BlockEntry> newBlocks);
 
-    /// Clear the scene (delegates to existing clear path).
-    void clearScene() { pendingClear = true; }
+    /// Clear the scene (delegates to existing clear path).  Also cancels any
+    /// pending scene load so the user gets a truly empty scene, even if an
+    /// autoload was queued for the next render frame.
+    void clearScene()
+    {
+        {
+            juce::ScopedLock lock(loadMutex_);
+            pendingLoadBlocks_.clear();
+        }
+        pendingLoad_  = false;
+        pendingClear  = true;
+    }
+
+    /// Display name for a serial in the current scene, e.g. "Violin 2".
+    /// Returns empty if the serial is not found.  Safe to call from the
+    /// message thread (reads the GL-thread-owned blockList by snapshot lock).
+    juce::String displayNameForSerial(int serial) const
+    {
+        auto blocks = getBlockListCopy();
+        for (const auto& b : blocks)
+            if (b.serial == serial)
+                return BlockEntry::displayName(b, blocks);
+        return {};
+    }
 
     /// Public access to the loaded sound index (used by BlockEditPopup).
     SoundLibrary& soundLibrary() noexcept { return library_; }
@@ -402,7 +424,12 @@ private:
     // =========================================================================
     std::vector<BlockEntry> blockList;
     int                     nextSerial = 1;
-    int highlightedBlockSerial_ = -1;
+    int highlightedBlockSerial_ = -1;  ///< Selected via timeline / viewport click
+    int hoveredBlockSerial_   = -1;  ///< Block under cursor (viewport hover)
+
+    /// Rebuild sidebar block list on the message thread.  When @p removedSerial
+    /// is >= 0, clear the info panel if it was showing that block.
+    void pushBlockListToUi(int removedSerial = -1);
 
     // =========================================================================
     // Sidebar / toggle
