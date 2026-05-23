@@ -20,7 +20,9 @@
 #include "SceneFile.h"
 #include "SceneAudioExporter.h"
 #include "SoundLibrary.h"
+#include "AudioAnalysis.h"
 #include <atomic>
+#include <array>
 #include <vector>
 
 class ViewPortComponent final
@@ -60,7 +62,26 @@ public:
     // ── Edit mode API (called by MainComponent) ───────────────────────────────
 
     std::optional<BlockEntry> getBlockBySerial(int serial) const;
-    void applySidebarBlockInfo(int serial, Vec3i pos, double start, double duration, bool movementEnabled);
+    void applySidebarBlockInfo(int serial,
+                               Vec3i pos,
+                               double start,
+                               double duration,
+                               bool movementEnabled,
+                               uint8_t playbackMode,
+                               double movementDurationSec,
+                               int movementYOffset,
+                               bool isMuted,
+                               bool isHidden,
+                               double loopBufferSec,
+                               bool isLooping,
+                               double loopDurationSec,
+                               double muteStartSec,
+                               double muteEndSec);
+
+    /// Resize @p serial's region duration to its loaded sample's natural
+    /// length, preserving any recorded movement span.  Safe to call from the
+    /// message thread.
+    void matchBlockDurationToSound(int serial);
 
     /// Fired when user clicks a block in edit mode.
     /// Args: serial, blockType, start, dur, soundId, customFilePath,
@@ -75,6 +96,10 @@ public:
     /// or cleared.  MainComponent uses this to update the transport bar without
     /// waiting for the next 30 Hz timer tick.
     std::function<void()> onBlockListChanged;
+
+    /// Fired on the message thread after sidebar edits or movement confirm
+    /// are applied on the GL thread (blockList snapshot is up to date next frame).
+    std::function<void(int serial)> onBlockPropertiesChanged;
 
     void updateBlockTiming(int serial, int timeIndex, double start, double duration);
 
@@ -164,6 +189,54 @@ public:
 
     void highlightBlock(int serial);
 
+    // ── Plane / arrow visibility toggles (message thread writes, GL reads) ────
+    void setShowFloorPlane (bool v) { showFloorPlane_ .store(v); repaint(); }
+    void setShowWallXPlane (bool v) { showWallXPlane_ .store(v); repaint(); }
+    void setShowWallZPlane (bool v) { showWallZPlane_ .store(v); repaint(); }
+    void setShowArrows     (bool v) { showArrows_      .store(v); repaint(); }
+
+    bool getShowFloorPlane () const noexcept { return showFloorPlane_ .load(); }
+    bool getShowWallXPlane () const noexcept { return showWallXPlane_ .load(); }
+    bool getShowWallZPlane () const noexcept { return showWallZPlane_ .load(); }
+    bool getShowArrows     () const noexcept { return showArrows_      .load(); }
+
+    /// Doppler effect toggle — forwards to AudioEngine and the exporter.
+    void setDopplerEnabled(bool v) { audioEngine.setDopplerEnabled(v); }
+    bool getDopplerEnabled() const noexcept { return audioEngine.isDopplerEnabled(); }
+
+    // ── Type filter (show / hide whole categories of blocks) ────────────────
+    void setBlockTypeVisible(BlockType t, bool v)
+    {
+        const auto idx = static_cast<size_t>(t);
+        if (idx < blockTypeVisible_.size())
+        {
+            blockTypeVisible_[idx].store(v);
+            repaint();
+        }
+    }
+
+    bool isBlockTypeVisible(BlockType t) const noexcept
+    {
+        const auto idx = static_cast<size_t>(t);
+        return idx >= blockTypeVisible_.size()
+               || blockTypeVisible_[idx].load();
+    }
+
+    // ── Per-type indefinite mute (toolbar Mute menu) ───────────────────────
+    void setBlockTypeMuted(BlockType t, bool muted)
+    {
+        const auto idx = static_cast<size_t>(t);
+        if (idx < blockTypeMuted_.size())
+            blockTypeMuted_[idx].store(muted);
+    }
+
+    bool isBlockTypeMuted(BlockType t) const noexcept
+    {
+        const auto idx = static_cast<size_t>(t);
+        return idx < blockTypeMuted_.size()
+               && blockTypeMuted_[idx].load();
+    }
+
     // ── Transport state queries (called by MainComponent to update transport bar) ─────
 
     bool   isTransportPlaying() const noexcept { return transportClock.isPlaying(); }
@@ -183,13 +256,40 @@ public:
         return maxEnd;
     }
 
-    void transportPlay()  { transportClock.start(); }
-    void transportPause() { transportClock.pause(); }
+    void transportPlay()
+    {
+        // Coming back from Pause: just unfreeze the audio thread.  Voices
+        // resume from where they were when the user paused.
+        transportClock.start();
+        audioEngine.setAudioPaused(false);
+    }
+
+    void transportPause()
+    {
+        // Freeze the clock AND the audio engine instantly — voices stop
+        // ringing out immediately and resume on Play with no drift.
+        transportClock.pause();
+        audioEngine.setAudioPaused(true);
+    }
+
     void transportStop()
     {
-        transportClock.stop();
-        pendingStop_ = true;   // GL thread drains this and calls resetAllBlocks
+        transportClock.stop();                              // clock back to 0
+        audioEngine.setAudioPaused(false);                  // not paused, just silent
+        audioEngine.killAllVoices();                        // kill every in-flight voice
+        pendingStop_ = true;                                // GL thread resets block state
         SequencerEngine::resetAllBlocks(blockList);
+
+        // Snap every block with recorded movement back to its starting keyframe.
+        // (The Pause button preserves position; Stop must rewind visuals too.)
+        if (SequencerEngine::snapBlockPositionsToTime(blockList, 0.0))
+        {
+            voxelGrid.clear();
+            for (const auto& b : blockList)
+                voxelGrid.add(b.pos);
+            renderer.meshDirty = true;
+            pushBlockListToUi();
+        }
     }
 
     /// Fast-forward / playback speed. 1.0 = real time. Routes to both the
@@ -266,7 +366,10 @@ public:
 
     bool deleteBlockOrRegion(int serial, int timeIndex);
 
-   
+    /// Offline pitch + waveform analysis for the selected block's WAV.
+    /// Safe on the message thread (read-only sample library access).
+    AudioAnalysisResult analyzeBlockAudio(const BlockEntry& block) const;
+
 
 private:
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -485,12 +588,28 @@ private:
     // =========================================================================
     struct PendingSidebarEdit
     {
-        int    serial          = -1;
-        Vec3i  pos;
-        double start           = 0.0;
-        double duration        = 1.0;
-        bool   movementEnabled = false;
-        bool   active          = false;
+        int     serial              = -1;
+        Vec3i   pos;
+        double  start               = 0.0;
+        double  duration            = 1.0;
+        bool    movementEnabled     = false;
+        bool    active              = false;
+
+        // Phase 1 movement controls
+        uint8_t playbackMode        = 0;
+        double  movementDurationSec = 0.0;
+        int     movementYOffset     = 0;
+
+        // v7 per-block UI flags
+        bool    isMuted             = false;
+        bool    isHidden            = false;
+        double  loopBufferSec       = 0.0;
+
+        // v8 / loop-section additions
+        bool    isLooping           = false;
+        double  loopDurationSec     = 0.0;
+        double  muteStartSec        = 0.0;
+        double  muteEndSec          = 0.0;
     };
     PendingSidebarEdit    pendingSidebarEdit_;
     juce::CriticalSection sidebarEditMutex_;
@@ -573,6 +692,60 @@ private:
     static constexpr int  kMaxUndoDepth = 20;
     std::vector<int>      undoStack_;
     std::atomic<bool>     pendingUndo_ { false };
+
+    // =========================================================================
+    // Plane / arrow visibility (user toggles in MainComponent)
+    // =========================================================================
+    std::atomic<bool> showFloorPlane_  { true };
+    std::atomic<bool> showWallXPlane_  { false };  // YZ plane (x = 0)  – off by default
+    std::atomic<bool> showWallZPlane_  { false };  // XY plane (z = 0)  – off by default
+    std::atomic<bool> showArrows_       { false }; //                  – off by default
+
+    // Per-block-type visibility filter.  Indexed by static_cast<size_t>(BlockType).
+    // All types start visible; the View menu in MainComponent flips entries.
+    // (std::atomic<bool> is non-copyable, so the array is default-initialized
+    //  and the constructor below stores `true` into every slot.)
+    static constexpr size_t kNumBlockTypes = static_cast<size_t>(BlockType::_Count);
+    std::array<std::atomic<bool>, kNumBlockTypes> blockTypeVisible_ {};
+    /// Per-type indefinite mute (mirrors blockTypeVisible_).  All audible
+    /// (false) at startup; the Mute menu in MainComponent toggles entries.
+    std::array<std::atomic<bool>, kNumBlockTypes> blockTypeMuted_   {};
+
+    // =========================================================================
+    // 3D arrow gizmo state  (GL thread owned, message thread peeks via atomic)
+    // =========================================================================
+    // Axis index convention used everywhere:  0 = X, 1 = Y, 2 = Z, -1 = none.
+    std::atomic<int> gizmoHoveredAxis_ { -1 };
+
+    struct GizmoDragRequest
+    {
+        enum Type { None, Start, Move, End } type = None;
+        float x = 0.f, y = 0.f;
+        int   axis = -1;       ///< Captured on the message thread for Start
+    };
+    GizmoDragRequest      pendingGizmoDrag_;
+    juce::CriticalSection gizmoMutex_;
+
+    /// Drag state.  `gizmoActiveAxis_` is also peeked by the message thread
+    /// (mouseDrag / mouseUp) to know whether a drag is in progress.
+    std::atomic<int> gizmoActiveAxis_  { -1 };  ///< -1 when not dragging
+    int   gizmoDragSerial_     = -1;
+    Vec3i gizmoDragOrigPos_;
+    float gizmoDragStartCoord_ = 0.f;    ///< Axis projection at drag start
+
+    /// Cast the current mouse ray against the move arrows of the selected
+    /// block.  Returns the closest axis index (0/1/2) or -1 if none.
+    int  pickGizmoAxis(float mx, float my) const;
+
+    /// Project the given screen ray onto the world-space line that passes
+    /// through @p axisOrigin in direction of @p axis (0=X,1=Y,2=Z).  Returns
+    /// the scalar coordinate along that axis (in world units).
+    float projectRayOntoAxis(float mx, float my,
+                             const Vec3f& axisOrigin, int axis) const;
+
+    /// World-space center of the selected block's arrow gizmo (block center).
+    /// Returns false if there is no selected block.
+    bool  getSelectedGizmoOrigin(Vec3f& outOrigin, int& outSerial) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ViewPortComponent)
 };

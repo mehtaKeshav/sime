@@ -67,8 +67,18 @@ private:
     juce::TextButton speedButton_  { "1x" };
     juce::TextButton collapseButton { "⌄" };
 
-    int    speedIndex_ = 0;                         ///< index into kSpeedRates
-    static constexpr double kSpeedRates[3] = { 1.0, 2.0, 3.0 };
+    /// All speeds the user can select from the popup menu.  Order shown in
+    /// the dropdown matches this array.  1.0 is the default.
+    static constexpr int    kSpeedCount    = 6;
+    static constexpr double kSpeedRates[kSpeedCount]
+        = { 0.25, 0.5, 0.75, 1.0, 2.0, 3.0 };
+    int                     speedIndex_    = 3;    ///< Index of 1.0x (default)
+
+    /// Format a rate as the short label shown on the button ("0.25x", "1x", "2x").
+    static juce::String formatSpeedLabel(double rate);
+
+    /// Open the speed popup menu anchored under the button.
+    void showSpeedMenu();
     juce::Label timeLabel;
     TimelineComponent timeline;
     juce::Rectangle<int> miniProgressBounds_;

@@ -59,8 +59,28 @@ private:
     void rebuildBlockTypeCombo();
     void syncComboToActive();
 
-    // ── File menu (DAW-style) ────────────────────────────────────────────────
+    // ── View toggle buttons (top toolbar) ────────────────────────────────────
+    // Floor = XZ plane (y=0).  WallX = YZ plane (x=0).  WallZ = XY plane (z=0).
+    // Plane buttons are labelled by the two axes that lie INSIDE the plane,
+    // matching common 3D-software convention:
+    //   * Floor   = XZ plane (y = 0)         – horizontal ground
+    //   * YZ Wall = vertical wall at x = 0   – contains the Y and Z axes
+    //   * XY Wall = vertical wall at z = 0   – contains the X and Y axes
+    juce::TextButton showFloorBtn_   { "Floor" };
+    juce::TextButton showWallXBtn_   { "YZ Wall" };
+    juce::TextButton showWallZBtn_   { "XY Wall" };
+    juce::TextButton showArrowsBtn_  { "Arrows" };
+    juce::TextButton dopplerBtn_     { "Doppler" };
+
+    void configureToggleButton(juce::TextButton& b);
+
+    // ── File / View / Mute menus (DAW-style) ────────────────────────────────
     juce::TextButton fileMenuBtn_;
+    juce::TextButton viewMenuBtn_;
+    juce::TextButton muteMenuBtn_;
+
+    void showViewMenu();
+    void showMuteMenu();
 
     juce::String currentFilePath_;
     std::unique_ptr<juce::FileChooser> fileChooser_;

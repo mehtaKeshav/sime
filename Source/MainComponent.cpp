@@ -46,6 +46,10 @@ MainComponent::MainComponent()
     // ── Wire sidebar collapse ─────────────────────────────────────────────────
     view.setSidebarComponent(&sidebar);
 
+    sidebar.setAudioAnalyzer([this](const BlockEntry& b)
+    {
+        return view.analyzeBlockAudio(b);
+    });
 
     view.onBlockSelected = [this](int serial)
     {
@@ -163,16 +167,77 @@ MainComponent::MainComponent()
     {
         view.setPlaybackRate(rate);
     };
-    sidebar.onApplyBlockInfo = [this](int serial, Vec3i pos, double start, double duration, bool movementEnabled)
+    sidebar.onApplyBlockInfo = [this](int serial, Vec3i pos, double start, double duration,
+                                      bool movementEnabled, uint8_t playbackMode,
+                                      double movementDurationSec, int movementYOffset,
+                                      bool isMuted, bool isHidden,
+                                      double loopBufferSec,
+                                      bool isLooping, double loopDurationSec,
+                                      double muteStartSec, double muteEndSec)
     {
-        view.applySidebarBlockInfo(serial, pos, start, duration, movementEnabled);
+        view.applySidebarBlockInfo(serial, pos, start, duration, movementEnabled,
+                                   playbackMode, movementDurationSec, movementYOffset,
+                                   isMuted, isHidden, loopBufferSec,
+                                   isLooping, loopDurationSec,
+                                   muteStartSec, muteEndSec);
 
-        auto updated = view.getBlockBySerial(serial);
-        if (updated)
-            sidebar.showBlockInfo(*updated, view.displayNameForSerial(serial));
+        // Optimistic sidebar refresh — getBlockBySerial reads a snapshot that
+        // may lag one frame behind the GL-thread apply, so merge form values
+        // explicitly and keep movement keyframes from the current panel.
+        BlockEntry display;
+        if (auto fromView = view.getBlockBySerial(serial))
+            display = *fromView;
+        else if (auto fromPanel = sidebar.getSelectedBlockCopy())
+            display = *fromPanel;
+        else
+            display.serial = serial;
+
+        if (auto fromPanel = sidebar.getSelectedBlockCopy())
+        {
+            if (fromPanel->serial == serial
+                && fromPanel->recordedMovement.size() >= display.recordedMovement.size())
+            {
+                display.recordedMovement     = fromPanel->recordedMovement;
+                display.hasRecordedMovement  = fromPanel->hasRecordedMovement;
+            }
+        }
+
+        display.pos                 = pos;
+        display.startTimeSec        = start;
+        display.durationSec         = duration;
+        display.movementEnabled     = movementEnabled;
+        display.playbackMode        = static_cast<BlockPlaybackMode>(playbackMode);
+        display.movementDurationSec = movementDurationSec;
+        display.movementYOffset     = movementYOffset;
+        display.isMuted             = isMuted;
+        display.isHidden            = isHidden;
+        display.loopBufferSec       = loopBufferSec;
+        display.isLooping           = isLooping;
+        display.loopDurationSec     = loopDurationSec;
+        display.muteStartSec        = muteStartSec;
+        display.muteEndSec          = muteEndSec;
+        if (!display.recordedMovement.empty())
+            display.hasRecordedMovement = true;
+
+        sidebar.showBlockInfo(display, view.displayNameForSerial(serial));
 
         transportBar.setBlocks(view.getBlockListCopy());
         markDirty();
+    };
+
+    sidebar.onMatchDurationToSound = [this](int serial)
+    {
+        view.matchBlockDurationToSound(serial);
+        if (auto block = view.getBlockBySerial(serial))
+            sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
+        transportBar.setBlocks(view.getBlockListCopy());
+        markDirty();
+    };
+
+    view.onBlockPropertiesChanged = [this](int serial)
+    {
+        if (auto block = view.getBlockBySerial(serial))
+            sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
     };
 
     // ── Block type toolbar ────────────────────────────────────────────────────
@@ -202,6 +267,42 @@ MainComponent::MainComponent()
     fileMenuBtn_.setColour(juce::TextButton::textColourOffId,    juce::Colour(0xffe2e6f2));
     fileMenuBtn_.setColour(juce::TextButton::textColourOnId,     juce::Colours::white);
     fileMenuBtn_.onClick = [this] { showFileMenu(); };
+
+    // ── View menu (per-type visibility filter) ──────────────────────────────
+    addChildComponent(viewMenuBtn_);
+    viewMenuBtn_.setButtonText(juce::String("View ") + juce::String::fromUTF8("\xe2\x96\xbe"));
+    viewMenuBtn_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff252840));
+    viewMenuBtn_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff3a3f60));
+    viewMenuBtn_.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffe2e6f2));
+    viewMenuBtn_.setColour(juce::TextButton::textColourOnId,  juce::Colours::white);
+    viewMenuBtn_.onClick = [this] { showViewMenu(); };
+
+    // ── Mute menu (per-type indefinite mute) ────────────────────────────────
+    addChildComponent(muteMenuBtn_);
+    muteMenuBtn_.setButtonText(juce::String("Mute ") + juce::String::fromUTF8("\xe2\x96\xbe"));
+    muteMenuBtn_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff252840));
+    muteMenuBtn_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff3a3f60));
+    muteMenuBtn_.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffe2e6f2));
+    muteMenuBtn_.setColour(juce::TextButton::textColourOnId,  juce::Colours::white);
+    muteMenuBtn_.onClick = [this] { showMuteMenu(); };
+
+    // ── View toggles (planes + arrows) ────────────────────────────────────────
+    configureToggleButton(showFloorBtn_);
+    configureToggleButton(showWallXBtn_);
+    configureToggleButton(showWallZBtn_);
+    configureToggleButton(showArrowsBtn_);
+    configureToggleButton(dopplerBtn_);
+    showFloorBtn_  .setToggleState(view.getShowFloorPlane(), juce::dontSendNotification);
+    showWallXBtn_  .setToggleState(view.getShowWallXPlane(), juce::dontSendNotification);
+    showWallZBtn_  .setToggleState(view.getShowWallZPlane(), juce::dontSendNotification);
+    showArrowsBtn_ .setToggleState(view.getShowArrows(),     juce::dontSendNotification);
+    dopplerBtn_    .setToggleState(false,                    juce::dontSendNotification);
+
+    showFloorBtn_  .onClick = [this] { const bool v = !view.getShowFloorPlane(); view.setShowFloorPlane(v); showFloorBtn_ .setToggleState(v, juce::dontSendNotification); };
+    showWallXBtn_  .onClick = [this] { const bool v = !view.getShowWallXPlane(); view.setShowWallXPlane(v); showWallXBtn_ .setToggleState(v, juce::dontSendNotification); };
+    showWallZBtn_  .onClick = [this] { const bool v = !view.getShowWallZPlane(); view.setShowWallZPlane(v); showWallZBtn_ .setToggleState(v, juce::dontSendNotification); };
+    showArrowsBtn_ .onClick = [this] { const bool v = !view.getShowArrows();     view.setShowArrows(v);     showArrowsBtn_.setToggleState(v, juce::dontSendNotification); };
+    dopplerBtn_    .onClick = [this] { const bool v = !dopplerBtn_.getToggleState(); view.setDopplerEnabled(v); dopplerBtn_.setToggleState(v, juce::dontSendNotification); };
 
     // ── Wire edit popup ───────────────────────────────────────────────────────
     view.onRequestBlockEdit = [this](int serial, BlockType type,
@@ -251,9 +352,26 @@ void MainComponent::showMovementConfirmPopup(int serial,
 {
     auto* popup = new MovementConfirmPopup(serial, duration, keyframes);  // ← Pass keyframes
     
-    popup->onConfirm = [this, serial](int s, double d)
+    popup->onConfirm = [this, serial, keyframes](int s, double d)
     {
         view.confirmMovementRecording(s, d);
+
+        BlockEntry display;
+        if (auto fromView = view.getBlockBySerial(s))
+            display = *fromView;
+        else if (auto fromPanel = sidebar.getSelectedBlockCopy())
+            display = *fromPanel;
+        else
+            display.serial = s;
+
+        display.recordedMovement    = keyframes;
+        display.hasRecordedMovement = keyframes.size() >= 2;
+        display.movementEnabled     = true;
+        display.durationSec         = d;
+        display.durationLocked      = true;
+
+        sidebar.showBlockInfo(display, view.displayNameForSerial(s));
+        view.highlightBlock(s);
     };
     
     popup->onCancel = [this, serial](int s)
@@ -287,8 +405,25 @@ void MainComponent::dismissStartupMenu()
     blockTypeCombo .setVisible(true);
     typePill_      .setVisible(true);
     fileMenuBtn_.setVisible(true);
+    viewMenuBtn_.setVisible(true);
+    muteMenuBtn_.setVisible(true);
+    showFloorBtn_  .setVisible(true);
+    showWallXBtn_  .setVisible(true);
+    showWallZBtn_  .setVisible(true);
+    showArrowsBtn_ .setVisible(true);
+    dopplerBtn_    .setVisible(true);
 
     resized();
+}
+
+void MainComponent::configureToggleButton(juce::TextButton& b)
+{
+    addChildComponent(b);
+    b.setClickingTogglesState(false);   // we drive the toggle state manually
+    b.setColour(juce::TextButton::buttonColourId,   juce::Colour(0xff1c1f2e));
+    b.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff3f6fff));
+    b.setColour(juce::TextButton::textColourOffId,  juce::Colour(0xffa9b1c3));
+    b.setColour(juce::TextButton::textColourOnId,   juce::Colours::white);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -393,6 +528,126 @@ void MainComponent::timerCallback()
 // ─────────────────────────────────────────────────────────────────────────────
 // File menu + export
 // ─────────────────────────────────────────────────────────────────────────────
+
+void MainComponent::showMuteMenu()
+{
+    juce::PopupMenu m;
+
+    constexpr int kMuteAllId = 1;
+    constexpr int kUnmuteAllId = 2;
+    constexpr int kTypeIdBase = 100;
+
+    m.addItem(kUnmuteAllId, "Unmute All Types");
+    m.addItem(kMuteAllId,   "Mute All Types");
+    m.addSeparator();
+
+    for (int c = 0; c < (int) BlockCategory::_Count; ++c)
+    {
+        const auto cat = static_cast<BlockCategory>(c);
+        auto types = blockTypesByCategory(cat);
+        if (types.empty()) continue;
+
+        juce::PopupMenu sub;
+        for (auto t : types)
+        {
+            // Tick = currently muted, so the user can tell at a glance
+            // which categories are silenced.
+            const bool muted = view.isBlockTypeMuted(t);
+            sub.addItem(juce::PopupMenu::Item(blockTypeDisplayName(t))
+                            .setID(kTypeIdBase + (int) t)
+                            .setTicked(muted));
+        }
+        m.addSubMenu(blockCategoryName(cat), sub);
+    }
+
+    m.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(&muteMenuBtn_),
+        [this](int result)
+        {
+            if (result == 0) return;
+
+            if (result == 1)            // Mute All
+            {
+                for (int i = 0; i < (int) BlockType::_Count; ++i)
+                    view.setBlockTypeMuted(static_cast<BlockType>(i), true);
+                return;
+            }
+            if (result == 2)            // Unmute All
+            {
+                for (int i = 0; i < (int) BlockType::_Count; ++i)
+                    view.setBlockTypeMuted(static_cast<BlockType>(i), false);
+                return;
+            }
+
+            constexpr int kTypeIdBase = 100;
+            const int typeIdx = result - kTypeIdBase;
+            if (typeIdx >= 0 && typeIdx < (int) BlockType::_Count)
+            {
+                const auto t = static_cast<BlockType>(typeIdx);
+                view.setBlockTypeMuted(t, !view.isBlockTypeMuted(t));
+            }
+        });
+}
+
+void MainComponent::showViewMenu()
+{
+    juce::PopupMenu m;
+
+    // Bulk actions at the top.
+    constexpr int kShowAllId = 1;
+    constexpr int kHideAllId = 2;
+    constexpr int kTypeIdBase = 100;  // ids kTypeIdBase + (int)BlockType
+
+    m.addItem(kShowAllId, "Show All Types");
+    m.addItem(kHideAllId, "Hide All Types");
+    m.addSeparator();
+
+    // Group by category so the menu mirrors the placement combo.
+    for (int c = 0; c < (int) BlockCategory::_Count; ++c)
+    {
+        const auto cat = static_cast<BlockCategory>(c);
+        auto types = blockTypesByCategory(cat);
+        if (types.empty()) continue;
+
+        juce::PopupMenu sub;
+        for (auto t : types)
+        {
+            const bool on = view.isBlockTypeVisible(t);
+            sub.addItem(juce::PopupMenu::Item(blockTypeDisplayName(t))
+                            .setID(kTypeIdBase + (int) t)
+                            .setTicked(on));
+        }
+        m.addSubMenu(blockCategoryName(cat), sub);
+    }
+
+    m.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(&viewMenuBtn_),
+        [this](int result)
+        {
+            if (result == 0) return;
+
+            if (result == 1)
+            {
+                for (int i = 0; i < (int) BlockType::_Count; ++i)
+                    view.setBlockTypeVisible(static_cast<BlockType>(i), true);
+                return;
+            }
+            if (result == 2)
+            {
+                for (int i = 0; i < (int) BlockType::_Count; ++i)
+                    view.setBlockTypeVisible(static_cast<BlockType>(i), false);
+                return;
+            }
+
+            constexpr int kTypeIdBase = 100;
+            const int typeIdx = result - kTypeIdBase;
+            if (typeIdx >= 0 && typeIdx < (int) BlockType::_Count)
+            {
+                const auto t = static_cast<BlockType>(typeIdx);
+                view.setBlockTypeVisible(t, !view.isBlockTypeVisible(t));
+            }
+        });
+}
 
 void MainComponent::showFileMenu()
 {
@@ -531,9 +786,22 @@ void MainComponent::resized()
     tx += 160 + gap;
 
     blockTypeCombo.setBounds(tx, ty, 200, 26);
+    tx += 200 + gap;
+
+    // ── View toggles laid out to the right of the block-type combo ────────────
+    // Allow extra width so the longer "YZ Wall" / "XY Wall" labels fit cleanly.
+    const int toggleW   = 64;
+    const int wallToggleW = 76;
+    showFloorBtn_  .setBounds(tx, ty, toggleW,     26); tx += toggleW     + gap;
+    showWallXBtn_  .setBounds(tx, ty, wallToggleW, 26); tx += wallToggleW + gap;
+    showWallZBtn_  .setBounds(tx, ty, wallToggleW, 26); tx += wallToggleW + gap;
+    showArrowsBtn_ .setBounds(tx, ty, toggleW,     26); tx += toggleW     + gap;
+    dopplerBtn_    .setBounds(tx, ty, toggleW,     26);
 
     const int fbtnW = 72;
-    fileMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW, ty, fbtnW, 26);
+    fileMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW,                 ty, fbtnW, 26);
+    viewMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW * 2 - 6,         ty, fbtnW, 26);
+    muteMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW * 3 - 12,        ty, fbtnW, 26);
 
     // Viewport gets remaining area above transport bar
     view.setBounds(area);

@@ -1,6 +1,7 @@
 #include "AudioEngine.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <cmath>
 
 // ---------------------------------------------------------------------------
 AudioEngine::AudioEngine()
@@ -261,6 +262,24 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
 {
     bufferToFill.clearActiveBufferRegion();
 
+    // ---- 0a. Stop -> kill every voice instantly ------------------------
+    if (killAllVoices_.exchange(false))
+        activeVoices_.clear();
+
+    // ---- 0b. Pause -> output silence and freeze voice positions --------
+    // We still drain the event queue (so a queued Stop completes), but we
+    // skip the per-voice advance entirely.  Voices resume from the exact
+    // sample they were on when the user hits Play again.
+    if (audioPaused_.load())
+    {
+        int s1, sz1, s2, sz2;
+        fifo_.prepareToRead(fifo_.getNumReady(), s1, sz1, s2, sz2);
+        for (int i = 0; i < sz1; ++i) dispatchEvent(queue_[s1 + i].ev);
+        for (int i = 0; i < sz2; ++i) dispatchEvent(queue_[s2 + i].ev);
+        fifo_.finishedRead(sz1 + sz2);
+        return;
+    }
+
     // ---- 1. Drain the event queue ---------------------------------------
     {
         int start1, size1, start2, size2;
@@ -292,12 +311,39 @@ void AudioEngine::getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferTo
                      ? outputBuffer->getWritePointer(1, startSample)
                      : nullptr;
 
-        const float step = voice.pitchRate * rate;
+        const float step = voice.pitchRate * voice.blockRate * voice.dopplerRate * rate;
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const int srcIdx = static_cast<int>(voice.samplePositionF);
-            if (srcIdx >= totalSrc) break;
+            // ── Loop-buffer silence between repeats ──────────────────────
+            if (voice.loopBuffer && voice.loopGapRemaining > 0.0f)
+            {
+                voice.loopGapRemaining -= 1.0f;
+                continue;       // emit silence for this output sample
+            }
+
+            int srcIdx = static_cast<int>(voice.samplePositionF);
+            if (srcIdx >= totalSrc)
+            {
+                if (!voice.loopBuffer)
+                    break;
+
+                if (voice.loopGapSamples > 0.0f)
+                {
+                    // Start the silence gap before the next loop iteration.
+                    voice.loopGapRemaining = voice.loopGapSamples;
+                    voice.samplePositionF  = 0.0f;
+                    continue;
+                }
+
+                // Tight loop: cheap modulo on the float cursor, keep the
+                // fractional part to avoid clicks.
+                const float wrapTo = std::fmod(voice.samplePositionF,
+                                               static_cast<float>(totalSrc));
+                voice.samplePositionF = wrapTo;
+                srcIdx = static_cast<int>(voice.samplePositionF);
+                if (srcIdx >= totalSrc) break;   // pathological (empty buffer)
+            }
 
             const float sample = voice.buffer->getSample(0, srcIdx);
 
@@ -354,18 +400,64 @@ void AudioEngine::dispatchEvent(const SequencerEvent& ev)
                 // Update pan based on X position (simple spatial audio)
                 float pan = juce::jmap(ev.blockX, -20.0f, 20.0f, -1.0f, 1.0f);
                 voice.pan = juce::jlimit(-1.0f, 1.0f, pan);
-                
+
                 // Recalculate gains
                 float leftGain = (1.0f - voice.pan) * 0.5f;
                 float rightGain = (1.0f + voice.pan) * 0.5f;
                 voice.leftGain = voice.gain * leftGain;
                 voice.rightGain = voice.gain * rightGain;
-                
-                DBG("Updated spatial audio for block " << ev.blockSerial 
-                    << " at X=" << ev.blockX << ", pan=" << voice.pan);
+
+                // Update cached source pos
+                voice.posX = ev.blockX;
+                voice.posY = ev.blockY;
+                voice.posZ = ev.blockZ;
+                if (ev.hasVelocity)
+                {
+                    voice.velX = ev.velocityX;
+                    voice.velY = ev.velocityY;
+                    voice.velZ = ev.velocityZ;
+                }
+                voice.dopplerRate = computeDopplerRate(voice.posX, voice.posY, voice.posZ,
+                                                       voice.velX, voice.velY, voice.velZ);
+
+                DBG("Updated spatial audio for block " << ev.blockSerial
+                    << " at X=" << ev.blockX << ", pan=" << voice.pan
+                    << ", doppler=" << voice.dopplerRate);
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+float AudioEngine::computeDopplerRate(float srcX, float srcY, float srcZ,
+                                      float vx,  float vy,  float vz) const noexcept
+{
+    if (!dopplerEnabled_.load())
+        return 1.0f;
+
+    const float lx = listenerX_.load();
+    const float ly = listenerY_.load();
+    const float lz = listenerZ_.load();
+
+    const float dx = lx - srcX;
+    const float dy = ly - srcY;
+    const float dz = lz - srcZ;
+
+    const float distSq = dx * dx + dy * dy + dz * dz;
+    if (distSq < 1e-4f)
+        return 1.0f;                       // listener sits on top of source
+
+    const float invDist = 1.0f / std::sqrt(distSq);
+    // Source velocity component along source→listener direction.
+    // Positive  = source moving toward the listener  (pitch up)
+    // Negative  = source moving away                  (pitch down)
+    const float vRadial = (vx * dx + vy * dy + vz * dz) * invDist;
+
+    const float c = speedOfSound_.load();
+    // Clamp the denominator to keep the rate finite if v_r approaches c.
+    const float denom = juce::jmax(c * 0.4f, c - vRadial);
+    const float rate  = c / denom;
+    return juce::jlimit(0.5f, 2.0f, rate);
 }
 
 // ---------------------------------------------------------------------------
@@ -380,8 +472,22 @@ void AudioEngine::handleStartEvent(const SequencerEvent& ev)
     voice.soundId         = ev.soundId;
     voice.samplePositionF = 0.0f;
     voice.buffer          = &it->second;
+    voice.loopBuffer      = ev.loopBuffer;
+    voice.blockRate       = juce::jlimit(0.1f, 8.0f, ev.playbackRateOverride);
+    voice.loopGapSamples  = std::max(0.0f,
+                                     ev.loopBufferSec * static_cast<float>(sampleRate_));
+    voice.loopGapRemaining = 0.0f;
 
     applySpatialPosition(voice, ev.blockX, ev.blockY, ev.blockZ);
+
+    voice.posX = ev.blockX;
+    voice.posY = ev.blockY;
+    voice.posZ = ev.blockZ;
+    voice.velX = ev.hasVelocity ? ev.velocityX : 0.0f;
+    voice.velY = ev.hasVelocity ? ev.velocityY : 0.0f;
+    voice.velZ = ev.hasVelocity ? ev.velocityZ : 0.0f;
+    voice.dopplerRate = computeDopplerRate(voice.posX, voice.posY, voice.posZ,
+                                           voice.velX, voice.velY, voice.velZ);
 
     activeVoices_.push_back(voice);
 }

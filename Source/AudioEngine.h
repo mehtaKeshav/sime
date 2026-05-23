@@ -25,16 +25,32 @@ struct ActiveVoice
     bool   stopping         = false;
     float  gain             = 1.0f;
     float  pan              = 0.0f; ///< -1 = full left, 0 = center, +1 = full right
-    float  pitchRate        = 1.0f; ///< Playback rate multiplier (1.0 = normal, 2.0 = octave up)
+    float  pitchRate        = 1.0f; ///< Spatial Y pitch shift (e.g. 1.0 = no shift)
+    float  blockRate        = 1.0f; ///< Per-block playback mode rate (Stretch / Speed)
+    float  dopplerRate      = 1.0f; ///< Per-voice rate multiplier from Doppler effect
     float  leftGain         = 1.0f; ///< Precomputed left channel gain (gain * pan law)
     float  rightGain        = 1.0f; ///< Precomputed right channel gain
+    bool   loopBuffer       = false; ///< When true, sample position wraps at buffer end
+
+    // Loop-with-buffer state (only meaningful when loopBuffer == true)
+    float  loopGapSamples    = 0.0f; ///< Silence to insert between repeats (samples)
+    float  loopGapRemaining  = 0.0f; ///< Counts down during the inter-loop silence
+
+    // ── Last known source position + velocity (for Doppler recompute) ────────
+    float  posX             = 0.0f;
+    float  posY             = 0.0f;
+    float  posZ             = 0.0f;
+    float  velX             = 0.0f;
+    float  velY             = 0.0f;
+    float  velZ             = 0.0f;
 
     const juce::AudioBuffer<float>* buffer = nullptr;
 
     bool isFinished() const noexcept
     {
-        return buffer == nullptr
-            || static_cast<int>(samplePositionF) >= buffer->getNumSamples();
+        if (buffer == nullptr) return true;
+        if (loopBuffer)        return false;   // looping voices only end via Stop event
+        return static_cast<int>(samplePositionF) >= buffer->getNumSamples();
     }
 };
 
@@ -136,6 +152,37 @@ public:
 
     double getPlaybackRate() const noexcept { return playbackRate_.load(); }
 
+    // ── Doppler effect (Phase 4) ────────────────────────────────────────────
+    /// Push the listener (camera) world position so the audio thread can use
+    /// it when computing Doppler shifts.  Cheap atomics, safe from any thread.
+    void setListenerPosition(float x, float y, float z) noexcept
+    {
+        listenerX_.store(x);
+        listenerY_.store(y);
+        listenerZ_.store(z);
+    }
+
+    void setDopplerEnabled(bool enabled) noexcept { dopplerEnabled_.store(enabled); }
+    bool isDopplerEnabled() const noexcept        { return dopplerEnabled_.load(); }
+
+    /// Speed of sound in world (grid) units per second.  Lower = stronger
+    /// Doppler effect for the same source velocity.
+    void setSpeedOfSound(float c) noexcept
+    {
+        speedOfSound_.store(juce::jlimit(5.0f, 343.0f, c));
+    }
+
+    // ── Transport-side audio gates (Pause / Stop) ───────────────────────────
+    /// When true, getNextAudioBlock outputs silence and DOES NOT advance any
+    /// voice positions.  This is how Pause freezes the audio instantly.
+    void setAudioPaused(bool paused) noexcept { audioPaused_.store(paused); }
+    bool isAudioPaused() const noexcept       { return audioPaused_.load(); }
+
+    /// Queues an immediate "kill all voices" for the audio thread.  Used by
+    /// Stop and Seek so the next callback drops every in-flight voice without
+    /// waiting for them to ring out.
+    void killAllVoices() noexcept             { killAllVoices_.store(true); }
+
 private:
     // ---- Sample library -------------------------------------------------
     std::unordered_map<int, juce::AudioBuffer<float>> sampleLibrary_;
@@ -165,6 +212,22 @@ private:
     int    blockSize_     = 512;
 
     std::atomic<float> playbackRate_ { 1.0f };
+
+    // Doppler state (audio-thread reads, message thread writes)
+    std::atomic<float> listenerX_      { 0.0f };
+    std::atomic<float> listenerY_      { 0.0f };
+    std::atomic<float> listenerZ_      { 0.0f };
+    std::atomic<bool>  dopplerEnabled_ { false };  // Off by default; user opt-in.
+    std::atomic<float> speedOfSound_   { 25.0f }; ///< world units / second
+
+    // Transport-side flags (audio-thread reads, message thread writes)
+    std::atomic<bool>  audioPaused_    { false };
+    std::atomic<bool>  killAllVoices_  { false };
+
+    /// Compute the Doppler rate multiplier for a given source position
+    /// and velocity, given the current listener position and speed of sound.
+    float computeDopplerRate(float srcX, float srcY, float srcZ,
+                             float vx,  float vy,  float vz) const noexcept;
 
     // ---- Internal helpers (called from audio thread) --------------------
     void dispatchEvent   (const SequencerEvent& ev);

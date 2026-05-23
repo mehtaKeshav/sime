@@ -10,7 +10,20 @@ SidebarComponent::SidebarComponent()
     addAndMakeVisible(startEditor);
     addAndMakeVisible(durationEditor);
     addAndMakeVisible(movementEnabledToggle);
+    addAndMakeVisible(modeCombo_);
+    addAndMakeVisible(movementDurationEditor_);
+    addAndMakeVisible(pathYOffsetEditor_);
+    addAndMakeVisible(loopToggle_);
+    addAndMakeVisible(loopDurationEditor_);
+    addAndMakeVisible(matchLoopDurBtn_);
+    addAndMakeVisible(loopBufferEditor_);
+    addAndMakeVisible(muteToggle_);
+    addAndMakeVisible(hideToggle_);
+    addAndMakeVisible(muteStartEditor_);
+    addAndMakeVisible(muteEndEditor_);
+    addAndMakeVisible(matchSoundDurBtn_);
     addAndMakeVisible(applyButton);
+    addAndMakeVisible(resetDefaultsBtn_);
 
     xEditor.setInputRestrictions(0, "-0123456789");
     yEditor.setInputRestrictions(0, "-0123456789");
@@ -18,6 +31,33 @@ SidebarComponent::SidebarComponent()
 
     startEditor.setInputRestrictions(0, "0123456789.");
     durationEditor.setInputRestrictions(0, "0123456789.");
+    movementDurationEditor_.setInputRestrictions(0, "0123456789.");
+    pathYOffsetEditor_.setInputRestrictions(0, "-0123456789");
+    loopBufferEditor_.setInputRestrictions(0, "0123456789.");
+    loopDurationEditor_.setInputRestrictions(0, "0123456789.");
+    muteStartEditor_.setInputRestrictions(0, "0123456789.");
+    muteEndEditor_  .setInputRestrictions(0, "0123456789.");
+
+    matchSoundDurBtn_.onClick = [this]
+    {
+        if (selectedBlock_ && onMatchDurationToSound)
+            onMatchDurationToSound(selectedBlock_->serial);
+    };
+
+    matchLoopDurBtn_.onClick = [this]
+    {
+        // Mirror the current block-duration value into the loop-duration
+        // field — quick way to say "loop fills the whole region".
+        loopDurationEditor_.setText(durationEditor.getText(),
+                                    juce::dontSendNotification);
+    };
+
+    modeCombo_.addItem("Natural",        1 + (int) BlockPlaybackMode::Natural);
+    modeCombo_.addItem("Loop",           1 + (int) BlockPlaybackMode::Loop);
+    modeCombo_.addItem("Stretch (slow)", 1 + (int) BlockPlaybackMode::Stretch);
+    modeCombo_.addItem("Speed (fast)",   1 + (int) BlockPlaybackMode::Speed);
+    modeCombo_.setSelectedId(1 + (int) BlockPlaybackMode::Natural,
+                             juce::dontSendNotification);
 
     applyButton.onClick = [this]
     {
@@ -32,13 +72,75 @@ SidebarComponent::SidebarComponent()
             zEditor.getText().getIntValue()
         };
 
-        double newStart = startEditor.getText().getDoubleValue();
+        double newStart    = startEditor.getText().getDoubleValue();
         double newDuration = durationEditor.getText().getDoubleValue();
+        bool   movementEn  = movementEnabledToggle.getToggleState();
 
-        bool movementEnabled = movementEnabledToggle.getToggleState();
+        const int comboId = modeCombo_.getSelectedId();
+        const uint8_t mode = comboId > 0
+            ? (uint8_t)(comboId - 1)
+            : (uint8_t) BlockPlaybackMode::Natural;
 
-        onApplyBlockInfo(serial, newPos, newStart, newDuration, movementEnabled);
+        const double movDur   = movementDurationEditor_.getText().getDoubleValue();
+        const int    yOff     = pathYOffsetEditor_.getText().getIntValue();
+        const double loopBuf  = loopBufferEditor_.getText().getDoubleValue();
+        const bool   isMuted  = muteToggle_.getToggleState();
+        const bool   isHidden = hideToggle_.getToggleState();
+        const bool   isLoop   = loopToggle_.getToggleState();
+        const double loopDur  = loopDurationEditor_.getText().getDoubleValue();
+        const double muteSt   = muteStartEditor_.getText().getDoubleValue();
+        const double muteEn   = muteEndEditor_  .getText().getDoubleValue();
+
+        // The Loop toggle is the canonical source of truth for the playback
+        // mode now that the popup loop button is gone.  Force the combo to
+        // agree so Apply always pushes a consistent (mode, isLooping) pair.
+        uint8_t effectiveMode = mode;
+        if (isLoop)
+            effectiveMode = (uint8_t) BlockPlaybackMode::Loop;
+        else if ((BlockPlaybackMode) mode == BlockPlaybackMode::Loop)
+            effectiveMode = (uint8_t) BlockPlaybackMode::Natural;
+
+        onApplyBlockInfo(serial, newPos, newStart, newDuration, movementEn,
+                         effectiveMode, movDur, yOff,
+                         isMuted, isHidden, loopBuf,
+                         isLoop, loopDur, muteSt, muteEn);
     };
+
+    resetDefaultsBtn_.onClick = [this]
+    {
+        if (!selectedBlock_ || !onApplyBlockInfo)
+            return;
+
+        const int serial = selectedBlock_->serial;
+
+        modeCombo_.setSelectedId(1 + (int) BlockPlaybackMode::Natural,
+                                 juce::dontSendNotification);
+        movementDurationEditor_.setText("0", juce::dontSendNotification);
+        pathYOffsetEditor_.setText("0", juce::dontSendNotification);
+        loopBufferEditor_.setText("0", juce::dontSendNotification);
+        loopDurationEditor_.setText("0", juce::dontSendNotification);
+        muteStartEditor_.setText("0", juce::dontSendNotification);
+        muteEndEditor_  .setText("0", juce::dontSendNotification);
+        loopToggle_.setToggleState(false, juce::dontSendNotification);
+        muteToggle_.setToggleState(false, juce::dontSendNotification);
+        hideToggle_.setToggleState(false, juce::dontSendNotification);
+
+        Vec3i pos {
+            xEditor.getText().getIntValue(),
+            yEditor.getText().getIntValue(),
+            zEditor.getText().getIntValue()
+        };
+        const double start = startEditor.getText().getDoubleValue();
+        const double dur   = durationEditor.getText().getDoubleValue();
+        const bool   movEn = movementEnabledToggle.getToggleState();
+
+        onApplyBlockInfo(serial, pos, start, dur, movEn,
+                         (uint8_t) BlockPlaybackMode::Natural,
+                         0.0, 0,
+                         false, false, 0.0,
+                         false, 0.0, 0.0, 0.0);
+    };
+
     toggleButton.onClick = [this]()
     {
         // ☰ = \xe2\x98\xb0  (U+2630 TRIGRAM FOR HEAVEN / hamburger)
@@ -126,7 +228,20 @@ void SidebarComponent::resized()
         startEditor.setBounds(0, 0, 0, 0);
         durationEditor.setBounds(0, 0, 0, 0);
         movementEnabledToggle.setBounds(0, 0, 0, 0);
+        modeCombo_.setBounds(0, 0, 0, 0);
+        movementDurationEditor_.setBounds(0, 0, 0, 0);
+        pathYOffsetEditor_.setBounds(0, 0, 0, 0);
+        loopToggle_.setBounds(0, 0, 0, 0);
+        loopDurationEditor_.setBounds(0, 0, 0, 0);
+        matchLoopDurBtn_.setBounds(0, 0, 0, 0);
+        loopBufferEditor_.setBounds(0, 0, 0, 0);
+        muteToggle_.setBounds(0, 0, 0, 0);
+        hideToggle_.setBounds(0, 0, 0, 0);
+        muteStartEditor_.setBounds(0, 0, 0, 0);
+        muteEndEditor_.setBounds(0, 0, 0, 0);
+        matchSoundDurBtn_.setBounds(0, 0, 0, 0);
         applyButton.setBounds(0, 0, 0, 0);
+        resetDefaultsBtn_.setBounds(0, 0, 0, 0);
         return;
     }
 
@@ -145,7 +260,20 @@ void SidebarComponent::resized()
     startEditor.setBounds(0, 0, 0, 0);
     durationEditor.setBounds(0, 0, 0, 0);
     movementEnabledToggle.setBounds(0, 0, 0, 0);
+    modeCombo_.setBounds(0, 0, 0, 0);
+    movementDurationEditor_.setBounds(0, 0, 0, 0);
+    pathYOffsetEditor_.setBounds(0, 0, 0, 0);
+    loopToggle_.setBounds(0, 0, 0, 0);
+    loopDurationEditor_.setBounds(0, 0, 0, 0);
+    matchLoopDurBtn_.setBounds(0, 0, 0, 0);
+    loopBufferEditor_.setBounds(0, 0, 0, 0);
+    muteToggle_.setBounds(0, 0, 0, 0);
+    hideToggle_.setBounds(0, 0, 0, 0);
+    muteStartEditor_.setBounds(0, 0, 0, 0);
+    muteEndEditor_.setBounds(0, 0, 0, 0);
+    matchSoundDurBtn_.setBounds(0, 0, 0, 0);
     applyButton.setBounds(0, 0, 0, 0);
+    resetDefaultsBtn_.setBounds(0, 0, 0, 0);
 
     if (!isInfoPanelOpen() || !selectedBlock_)
         return;
@@ -158,27 +286,120 @@ void SidebarComponent::resized()
     const int editorX = margin + labelW + 10;
     const int editorW = getWidth() - editorX - margin;
 
-    int y = 86;
+    // ── Fixed bottom strip for Apply / Reset ─────────────────────────────────
+    const int btnH = 32;
+    const int btnGap = 8;
+    const int bottomY = getHeight() - margin - btnH;
 
-    xEditor.setBounds(editorX, y, editorW, editorH);
+    resetDefaultsBtn_.setBounds(margin, bottomY - btnH - btnGap,
+                                getWidth() - 2 * margin, btnH);
+    applyButton.setBounds(margin, bottomY, getWidth() - 2 * margin, btnH);
+
+    // ── Scrollable content area ──────────────────────────────────────────────
+    // Logical y starts at 86; paint() and setBounds() apply the scroll offset.
+    infoScrollAreaTop_ = 86;
+    infoScrollAreaBot_ = bottomY - btnH - btnGap - 6;   // gap above Reset btn
+
+    auto placeRow = [&](juce::Component& c, int logicalY,
+                        int x, int w, int h)
+    {
+        const int yScreen = logicalY - infoScrollY_;
+        // Hide rows that have scrolled outside the visible content area, so
+        // they don't paint over the tab header or the bottom button strip.
+        if (yScreen + h <= infoScrollAreaTop_
+            || yScreen >= infoScrollAreaBot_)
+        {
+            c.setBounds(0, 0, 0, 0);
+        }
+        else
+        {
+            c.setBounds(x, yScreen, w, h);
+        }
+    };
+
+    int y = infoScrollAreaTop_;
+
+    placeRow(xEditor, y, editorX, editorW, editorH);
     y += editorH + rowGap;
 
-    yEditor.setBounds(editorX, y, editorW, editorH);
+    placeRow(yEditor, y, editorX, editorW, editorH);
     y += editorH + rowGap;
 
-    zEditor.setBounds(editorX, y, editorW, editorH);
+    placeRow(zEditor, y, editorX, editorW, editorH);
     y += editorH + 24;
 
-    startEditor.setBounds(editorX, y, editorW, editorH);
+    placeRow(startEditor, y, editorX, editorW, editorH);
     y += editorH + rowGap;
 
-    durationEditor.setBounds(editorX, y, editorW, editorH);
+    placeRow(durationEditor, y, editorX, editorW, editorH);
     y += editorH + 24;
 
-    movementEnabledToggle.setBounds(margin, y, getWidth() - 2 * margin, 28);
-    y += 40;
+    placeRow(movementEnabledToggle, y, margin, getWidth() - 2 * margin, 28);
+    y += 36;
 
-    applyButton.setBounds(margin, getHeight() - 52, getWidth() - 2 * margin, 36);
+    placeRow(modeCombo_, y, editorX, editorW, editorH);
+    y += editorH + rowGap;
+
+    placeRow(movementDurationEditor_, y, editorX, editorW, editorH);
+    y += editorH + rowGap;
+
+    placeRow(pathYOffsetEditor_, y, editorX, editorW, editorH);
+    y += editorH + 16;
+
+    // ── Loop section (toggle, loop duration + match-block button, gap) ─────
+    placeRow(loopToggle_, y, margin, getWidth() - 2 * margin, 26);
+    y += 30;
+
+    const int matchBtnW = 110;
+    loopDurationEditor_.setBounds(editorX, y,
+                                  std::max(40, editorW - matchBtnW - 6), editorH);
+    matchLoopDurBtn_.setBounds(editorX + std::max(40, editorW - matchBtnW - 6) + 6,
+                               y, matchBtnW, editorH);
+    y += editorH + rowGap;
+
+    placeRow(loopBufferEditor_, y, editorX, editorW, editorH);
+    y += editorH + 16;
+
+    placeRow(muteToggle_, y, margin, getWidth() - 2 * margin, 26);
+    y += 30;
+
+    placeRow(hideToggle_, y, margin, getWidth() - 2 * margin, 26);
+    y += 30;
+
+    // Time-window mute: two editors share one row, "from"/"to" labels are
+    // painted in paint() to keep this layout block tight.
+    const int halfW = (editorW - 6) / 2;
+    muteStartEditor_.setBounds(editorX,                y, halfW, editorH);
+    muteEndEditor_  .setBounds(editorX + halfW + 6,    y, halfW, editorH);
+    y += editorH + 16;
+
+    placeRow(matchSoundDurBtn_, y, margin, getWidth() - 2 * margin, 28);
+    y += 36;
+
+    // Sound header + stats line (paint-only)
+    y += 18;                // "Sound" header
+    y += 30;                // stats line
+    y += 68 + 10;           // oscillation graph
+
+    // Movement section header + graph (paint-only)
+    y += 16;                // "Movement" label
+    y += 108;               // movement graph
+
+    infoContentBottomY_ = y;
+
+    // Clamp scroll so we never scroll past the end.
+    const int visibleH  = infoScrollAreaBot_ - infoScrollAreaTop_;
+    const int totalH    = infoContentBottomY_ - infoScrollAreaTop_;
+    const int maxScroll = std::max(0, totalH - visibleH);
+    if (infoScrollY_ > maxScroll)
+    {
+        infoScrollY_ = maxScroll;
+        // Re-place rows with the corrected offset on the next paint pass.
+        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<SidebarComponent>(this)]
+        {
+            if (safe != nullptr) safe->resized();
+        });
+    }
 }
 
 void SidebarComponent::paint(juce::Graphics& g)
@@ -341,7 +562,14 @@ void SidebarComponent::paint(juce::Graphics& g)
                    getWidth() - 2 * margin, 26,
                    juce::Justification::centredLeft);
 
-        int y = 86;
+        // ── Clip + scroll the rest of the info content ───────────────────────
+        const int clipTop = infoScrollAreaTop_;
+        const int clipBot = juce::jmax(clipTop + 1, infoScrollAreaBot_);
+        g.saveState();
+        g.reduceClipRegion(0, clipTop, getWidth(), clipBot - clipTop);
+
+        const int scroll = infoScrollY_;
+        int y = 86 - scroll;          // start of the scrolling content
 
         g.setFont(juce::Font("Public Sans", 13.0f, juce::Font::plain));
         g.setColour(text);
@@ -361,16 +589,125 @@ void SidebarComponent::paint(juce::Graphics& g)
         g.drawText("Duration:", margin, y, labelW, editorH, juce::Justification::centredLeft);
         y += editorH + 24;
 
-        y += 40;
+        // Movement toggle row label is drawn by the toggle itself; skip the
+        // toggle height (28) + 36-px row gap that matches resized().
+        y += 28 + 8;
+
+        g.drawText("Mode:",         margin, y, labelW, editorH, juce::Justification::centredLeft);
+        y += editorH + rowGap;
+
+        g.drawText("Move dur (s):", margin, y, labelW, editorH, juce::Justification::centredLeft);
+        y += editorH + rowGap;
+
+        g.drawText("Path Y lift:",  margin, y, labelW, editorH, juce::Justification::centredLeft);
+        y += editorH + 16;
+
+        // Loop toggle row (no left-side label — the toggle draws its own).
+        y += 30;
+
+        // Loop duration row + "= Block Dur." button.
+        g.drawText("Loop length:", margin, y, labelW, editorH, juce::Justification::centredLeft);
+        y += editorH + rowGap;
+
+        // Loop gap row.
+        g.drawText("Loop gap (s):", margin, y, labelW, editorH, juce::Justification::centredLeft);
+        y += editorH + 16;
+
+        // Mute / Hide toggle rows.
+        y += 30;   // mute toggle
+        y += 30;   // hide toggle
+
+        // Mute-window row: paint the "Mute from/to" labels in line with the
+        // shared-row editors set up in resized().
+        g.drawText("Mute from / to:", margin, y, labelW, editorH,
+                   juce::Justification::centredLeft);
+        y += editorH + 16;
+
+        // Match-to-sound button row.
+        y += 36;
+
+        // (All Y arithmetic below is in scrolled coordinates.)
+
+        // ── Audio analysis (frequency + oscillation) ─────────────────────────
+        g.setFont(juce::Font("Public Sans", 12.0f, juce::Font::bold));
+        g.setColour(juce::Colour(0xff6a9fd8));
+        g.drawText("Sound",
+                   margin, y, getWidth() - 2 * margin, 16,
+                   juce::Justification::centredLeft);
+        y += 18;
+
+        g.setFont(juce::Font("Public Sans", 11.0f, juce::Font::plain));
+        g.setColour(juce::Colour(0xffaac8e8));
+
+        juce::String statsLine;
+        if (audioAnalysis_.valid)
+        {
+            statsLine = audioAnalysis_.pitchLabel;
+            statsLine += "   ·   "
+                       + juce::String(audioAnalysis_.durationSec, 2) + " s";
+            if (audioAnalysis_.pitchReliable && audioAnalysis_.fundamentalHz > 0.f)
+            {
+                const float periodMs = 1000.f / audioAnalysis_.fundamentalHz;
+                statsLine += "   ·   "
+                           + juce::String(periodMs, 2) + " ms / cycle";
+            }
+        }
+        else
+        {
+            statsLine = selectedBlock_->soundId >= 0
+                ? "Sample not loaded"
+                : "No sound assigned";
+        }
+
+        g.drawText(statsLine,
+                   margin, y, getWidth() - 2 * margin, 28,
+                   juce::Justification::topLeft);
+        y += 30;
+
+        constexpr int kWaveH = 68;
+        juce::Rectangle<int> waveArea(margin, y, getWidth() - 2 * margin, kWaveH);
+        audioWaveformGraph(g, waveArea);
+        y += kWaveH + 10;
 
         juce::Rectangle<int> graphArea(
             margin,
             y,
             getWidth() - 2 * margin,
-            145
+            108
         );
 
+        g.setFont(juce::Font("Public Sans", 12.0f, juce::Font::bold));
+        g.setColour(juce::Colour(0xff6a9fd8));
+        g.drawText("Movement",
+                   margin, graphArea.getY() - 16,
+                   getWidth() - 2 * margin, 14,
+                   juce::Justification::centredLeft);
+
         movementGraph(g, *selectedBlock_, graphArea);
+
+        g.restoreState();
+
+        // ── Vertical scrollbar indicator (only when content overflows) ───────
+        {
+            const int visibleH = infoScrollAreaBot_ - infoScrollAreaTop_;
+            const int totalH   = infoContentBottomY_ - infoScrollAreaTop_;
+            if (totalH > visibleH)
+            {
+                const float trackX = (float) (getWidth() - 6);
+                const float trackY = (float) infoScrollAreaTop_;
+                const float trackH = (float) visibleH;
+                g.setColour(juce::Colour(0x33ffffff));
+                g.fillRoundedRectangle(trackX, trackY, 3.f, trackH, 1.5f);
+
+                const float thumbH = juce::jmax(20.f,
+                                                trackH * (float) visibleH / (float) totalH);
+                const float thumbY = trackY
+                    + (trackH - thumbH) * (float) infoScrollY_
+                                        / (float) juce::jmax(1, totalH - visibleH);
+                g.setColour(juce::Colour(0xffaac8e8).withAlpha(0.55f));
+                g.fillRoundedRectangle(trackX, thumbY, 3.f, thumbH, 1.5f);
+            }
+        }
         return;
     }
 }
@@ -393,11 +730,61 @@ void SidebarComponent::showBlockInfo(const BlockEntry& block,
     startEditor.setText(juce::String(block.startTimeSec, 2), juce::dontSendNotification);
     durationEditor.setText(juce::String(block.durationSec, 2), juce::dontSendNotification);
 
-    movementEnabledToggle.setToggleState(
-        block.hasRecordedMovement,
-        juce::dontSendNotification
-    );
+    const bool hasPath = block.hasRecordedMovement
+                      && block.recordedMovement.size() >= 2;
 
+    movementEnabledToggle.setEnabled(hasPath);
+    movementEnabledToggle.setToggleState(block.movementEnabled && hasPath,
+                                         juce::dontSendNotification);
+
+    modeCombo_.setSelectedId(1 + (int) block.playbackMode,
+                             juce::dontSendNotification);
+
+    movementDurationEditor_.setText(juce::String(block.movementDurationSec, 2),
+                                    juce::dontSendNotification);
+    pathYOffsetEditor_.setText(juce::String(block.movementYOffset),
+                               juce::dontSendNotification);
+    loopBufferEditor_.setText(juce::String(block.loopBufferSec, 2),
+                              juce::dontSendNotification);
+    loopDurationEditor_.setText(juce::String(block.loopDurationSec, 2),
+                                juce::dontSendNotification);
+    muteToggle_.setToggleState(block.isMuted,  juce::dontSendNotification);
+    hideToggle_.setToggleState(block.isHidden, juce::dontSendNotification);
+    muteStartEditor_.setText(juce::String(block.muteStartSec, 2),
+                             juce::dontSendNotification);
+    muteEndEditor_  .setText(juce::String(block.muteEndSec,   2),
+                             juce::dontSendNotification);
+
+    const bool loopOn = block.isLooping
+                     || block.playbackMode == BlockPlaybackMode::Loop;
+    loopToggle_.setToggleState(loopOn, juce::dontSendNotification);
+
+    audioAnalysis_ = {};
+    if (audioAnalyzer_)
+        audioAnalysis_ = audioAnalyzer_(block);
+
+    infoScrollY_ = 0;
+    resized();
+    repaint();
+}
+
+void SidebarComponent::mouseWheelMove(const juce::MouseEvent& e,
+                                      const juce::MouseWheelDetails& wheel)
+{
+    juce::ignoreUnused(e);
+
+    if (collapsed || !isInfoPanelOpen() || !selectedBlock_)
+        return;
+
+    const int visibleH = infoScrollAreaBot_ - infoScrollAreaTop_;
+    const int totalH   = infoContentBottomY_ - infoScrollAreaTop_;
+    const int maxScroll = std::max(0, totalH - visibleH);
+    if (maxScroll <= 0)
+        return;
+
+    // Positive deltaY = wheel up = scroll content up (show earlier content).
+    const int step = static_cast<int>(wheel.deltaY * -80.f);
+    infoScrollY_ = std::clamp(infoScrollY_ + step, 0, maxScroll);
     resized();
     repaint();
 }
@@ -415,6 +802,19 @@ void SidebarComponent::clearSelectedBlock()
     startEditor.setText({}, juce::dontSendNotification);
     durationEditor.setText({}, juce::dontSendNotification);
     movementEnabledToggle.setToggleState(false, juce::dontSendNotification);
+    modeCombo_.setSelectedId(1 + (int) BlockPlaybackMode::Natural,
+                             juce::dontSendNotification);
+    movementDurationEditor_.setText({}, juce::dontSendNotification);
+    pathYOffsetEditor_.setText({}, juce::dontSendNotification);
+    loopBufferEditor_.setText({}, juce::dontSendNotification);
+    loopDurationEditor_.setText({}, juce::dontSendNotification);
+    muteStartEditor_.setText({}, juce::dontSendNotification);
+    muteEndEditor_  .setText({}, juce::dontSendNotification);
+    loopToggle_.setToggleState(false,  juce::dontSendNotification);
+    muteToggle_.setToggleState(false,  juce::dontSendNotification);
+    hideToggle_.setToggleState(false,  juce::dontSendNotification);
+    audioAnalysis_ = {};
+    infoScrollY_ = 0;
 
     resized();
     repaint();
@@ -442,10 +842,20 @@ void SidebarComponent::movementGraph(juce::Graphics& g,
     {
         g.setColour(juce::Colours::white.withAlpha(0.55f));
         g.setFont(juce::Font("Public Sans", 12.0f, juce::Font::plain));
-        g.drawText("No recorded movement",
+        g.drawText(block.hasRecordedMovement ? "Record more keyframes (Alt+LMB drag)"
+                                             : "No recorded movement",
                    graphArea,
                    juce::Justification::centred);
         return;
+    }
+
+    if (!block.movementEnabled)
+    {
+        g.setColour(juce::Colours::orange.withAlpha(0.85f));
+        g.setFont(juce::Font("Public Sans", 11.0f, juce::Font::italic));
+        g.drawText("Movement disabled",
+                   graphArea.removeFromTop(18),
+                   juce::Justification::centred);
     }
 
     auto area = graphArea.reduced(10);
@@ -569,4 +979,78 @@ void SidebarComponent::movementGraph(juce::Graphics& g,
              + "   Z " + juce::String(minZ) + arrow + juce::String(maxZ),
                graphArea.reduced(6).removeFromBottom(12),
                juce::Justification::centredLeft);
+}
+
+void SidebarComponent::audioWaveformGraph(juce::Graphics& g,
+                                          juce::Rectangle<int> area) const
+{
+    g.setColour(juce::Colour(0xff151a2e));
+    g.fillRoundedRectangle(area.toFloat(), 6.0f);
+
+    g.setColour(juce::Colour(0xff445577));
+    g.drawRoundedRectangle(area.toFloat(), 6.0f, 1.0f);
+
+    if (!audioAnalysis_.valid
+        || audioAnalysis_.waveformMin.empty()
+        || audioAnalysis_.waveformMax.empty())
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.45f));
+        g.setFont(juce::Font("Public Sans", 11.0f, juce::Font::plain));
+        g.drawText("No waveform",
+                   area,
+                   juce::Justification::centred);
+        return;
+    }
+
+    auto plot = area.reduced(8);
+    const float midY = plot.getCentreY();
+    const float halfH = plot.getHeight() * 0.45f;
+
+    // Centre line
+    g.setColour(juce::Colour(0xff2c344f));
+    g.drawHorizontalLine(static_cast<int>(midY),
+                         static_cast<float>(plot.getX()),
+                         static_cast<float>(plot.getRight()));
+
+    const int cols = static_cast<int>(audioAnalysis_.waveformMin.size());
+    const float colW = plot.getWidth() / static_cast<float>(cols);
+
+    juce::Path fillPath;
+    bool started = false;
+
+    for (int c = 0; c < cols; ++c)
+    {
+        const float x = plot.getX() + (c + 0.5f) * colW;
+        const float yMax = midY - audioAnalysis_.waveformMax[static_cast<size_t>(c)] * halfH;
+        if (!started)
+        {
+            fillPath.startNewSubPath(x, yMax);
+            started = true;
+        }
+        else
+        {
+            fillPath.lineTo(x, yMax);
+        }
+    }
+
+    for (int c = cols - 1; c >= 0; --c)
+    {
+        const float x = plot.getX() + (c + 0.5f) * colW;
+        const float yMin = midY - audioAnalysis_.waveformMin[static_cast<size_t>(c)] * halfH;
+        fillPath.lineTo(x, yMin);
+    }
+
+    fillPath.closeSubPath();
+
+    g.setColour(juce::Colour(0xff3f8cff).withAlpha(0.35f));
+    g.fillPath(fillPath);
+
+    g.setColour(juce::Colour(0xff7eb8ff).withAlpha(0.9f));
+    g.strokePath(fillPath, juce::PathStrokeType(1.2f));
+
+    g.setColour(juce::Colours::grey.withAlpha(0.7f));
+    g.setFont(juce::Font("Public Sans", 8.5f, juce::Font::plain));
+    g.drawText("Oscillation",
+               plot.removeFromBottom(10),
+               juce::Justification::centredRight);
 }

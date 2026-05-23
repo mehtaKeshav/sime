@@ -10,7 +10,7 @@
 namespace
 {
     static constexpr char     kMagic[4] = { 'S', 'I', 'M', 'E' };
-    static constexpr uint16_t kVersion  = 4;   // bumped from 1: adds loop fields
+    static constexpr uint16_t kVersion  = 8;   // v8: adds muteStartSec, muteEndSec
 
     // Tiny endian-agnostic helpers (no-op on x86 but keeps intent clear)
     template <typename T>
@@ -79,6 +79,23 @@ bool SceneFile::save(const std::string& path, const std::vector<BlockEntry>& blo
         // --- v2 additions ---
         writeVal<uint8_t>(f, b.isLooping ? 1 : 0);
         writeVal<double>(f, b.loopDurationSec);
+
+        // --- v5 additions: Phase 1 movement controls ---
+        writeVal<uint8_t>(f, static_cast<uint8_t>(b.playbackMode));
+        writeVal<double>(f, b.movementDurationSec);
+        writeVal<int32_t>(f, b.movementYOffset);
+
+        // --- v6 additions ---
+        writeVal<uint8_t>(f, b.movementEnabled ? 1 : 0);
+
+        // --- v7 additions ---
+        writeVal<uint8_t>(f, b.isMuted  ? 1 : 0);
+        writeVal<uint8_t>(f, b.isHidden ? 1 : 0);
+        writeVal<double>(f, b.loopBufferSec);
+
+        // --- v8 additions: time-window mute ---
+        writeVal<double>(f, b.muteStartSec);
+        writeVal<double>(f, b.muteEndSec);
     }
 
     return f.good();
@@ -210,6 +227,56 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
         {
             b.isLooping       = false;
             b.loopDurationSec = 4.0;
+        }
+
+        // --- v5 additions: playbackMode / movementDurationSec / movementYOffset ---
+        if (version >= 5)
+        {
+            uint8_t pm = 0;
+            if (!readVal(f, pm)) return false;
+            b.playbackMode = static_cast<BlockPlaybackMode>(pm);
+
+            if (!readVal(f, b.movementDurationSec)) return false;
+
+            int32_t yo = 0;
+            if (!readVal(f, yo)) return false;
+            b.movementYOffset = yo;
+        }
+        else
+        {
+            // Map the legacy isLooping flag into the new mode enum.
+            b.playbackMode        = b.isLooping ? BlockPlaybackMode::Loop
+                                                : BlockPlaybackMode::Natural;
+            b.movementDurationSec = 0.0;
+            b.movementYOffset     = 0;
+        }
+
+        if (version >= 6)
+        {
+            uint8_t me = 1;
+            if (!readVal(f, me)) return false;
+            b.movementEnabled = (me != 0);
+        }
+        else
+        {
+            // Older files: movement plays whenever a path was saved.
+            b.movementEnabled = b.hasRecordedMovement;
+        }
+
+        if (version >= 7)
+        {
+            uint8_t mu = 0, hd = 0;
+            if (!readVal(f, mu)) return false;
+            if (!readVal(f, hd)) return false;
+            if (!readVal(f, b.loopBufferSec)) return false;
+            b.isMuted  = (mu != 0);
+            b.isHidden = (hd != 0);
+        }
+
+        if (version >= 8)
+        {
+            if (!readVal(f, b.muteStartSec)) return false;
+            if (!readVal(f, b.muteEndSec))   return false;
         }
 
         b.resetPlaybackState();

@@ -4,6 +4,7 @@
 
 #include "Renderer.h"
 
+#include <juce_core/juce_core.h>
 #include <juce_opengl/juce_opengl.h>
 using namespace juce::gl;
 
@@ -11,6 +12,7 @@ using namespace juce::gl;
 #include <cstring>
 #include <stdexcept>
 #include <array>
+#include <cmath>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Embedded GLSL shaders  (GLSL 330 core, compatible with GL 3.3+)
@@ -229,7 +231,8 @@ void Renderer::init()
 
     // ── Build static meshes ───────────────────────────────────────────────────
 
-    buildGridMesh(40);
+    buildPlaneMeshes(40);
+    buildArrowMeshes();
     buildWireframeCube();
     buildOriginCube();
 }
@@ -240,10 +243,13 @@ void Renderer::shutdown()
     auto delV = [](GLuint& h) { if (h) { glDeleteVertexArrays(1, &h); h = 0; } };
     auto delP = [](GLuint& h) { if (h) { glDeleteProgram(h); h = 0; } };
 
-    delV(vaoVoxels); del(vboVoxels);
-    delV(vaoGrid);   del(vboGrid);
-    delV(vaoWire);   del(vboWire);
-    delV(vaoCube);   del(vboCube);
+    delV(vaoVoxels);   del(vboVoxels);
+    delV(vaoPlaneXZ);  del(vboPlaneXZ);
+    delV(vaoPlaneXY);  del(vboPlaneXY);
+    delV(vaoPlaneYZ);  del(vboPlaneYZ);
+    delV(vaoWire);     del(vboWire);
+    delV(vaoCube);     del(vboCube);
+    for (int i = 0; i < 3; ++i) { delV(vaoArrow[i]); del(vboArrow[i]); }
     delP(progVoxels);
     delP(progUnlit);
 }
@@ -252,40 +258,202 @@ void Renderer::shutdown()
 // buildGridMesh  –  horizontal line grid at y = 0
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Legacy single-plane builder.  Kept as a thin wrapper so existing callers
+// (renderGrid) still resolve; it just builds the XZ floor mesh.
 void Renderer::buildGridMesh(int halfSize)
 {
-    // X-parallel lines and Z-parallel lines from -halfSize to +halfSize
-    std::vector<float> verts;
-    verts.reserve((halfSize * 2 + 1) * 4 * 3);
+    juce::ignoreUnused(halfSize);
+    // No-op: superseded by buildPlaneMeshes().
+}
 
-    for (int i = -halfSize; i <= halfSize; ++i)
+// ─────────────────────────────────────────────────────────────────────────────
+// buildPlaneMeshes  –  three line grids, one per axis-aligned plane
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace
+{
+    // Upload @p verts (xyz triples) as a static line VBO.  Returns vert count.
+    int uploadLineMesh(GLuint& vao, GLuint& vbo,
+                       const std::vector<float>& verts)
     {
-        float fi = static_cast<float>(i);
-        float fH = static_cast<float>(halfSize);
+        glGenVertexArrays(1, &vao);
+        glGenBuffers     (1, &vbo);
 
-        // X-parallel line
-        verts.insert(verts.end(), { -fH, 0.f, fi });
-        verts.insert(verts.end(), {  fH, 0.f, fi });
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                     verts.data(), GL_STATIC_DRAW);
 
-        // Z-parallel line
-        verts.insert(verts.end(), { fi, 0.f, -fH });
-        verts.insert(verts.end(), { fi, 0.f,  fH });
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glBindVertexArray(0);
+
+        return static_cast<int>(verts.size() / 3);
+    }
+}
+
+void Renderer::buildPlaneMeshes(int halfSize)
+{
+    const float fH = static_cast<float>(halfSize);
+
+    // ── XZ floor (y = 0) ─────────────────────────────────────────────────────
+    {
+        std::vector<float> verts;
+        verts.reserve((halfSize * 2 + 1) * 4 * 3);
+
+        for (int i = -halfSize; i <= halfSize; ++i)
+        {
+            const float fi = static_cast<float>(i);
+            verts.insert(verts.end(), { -fH, 0.f, fi });
+            verts.insert(verts.end(), {  fH, 0.f, fi });
+            verts.insert(verts.end(), { fi, 0.f, -fH });
+            verts.insert(verts.end(), { fi, 0.f,  fH });
+        }
+        planeXZVertCount = uploadLineMesh(vaoPlaneXZ, vboPlaneXZ, verts);
     }
 
-    gridVertCount = static_cast<int>(verts.size() / 3);
+    // ── XY wall (z = 0, vertical) ────────────────────────────────────────────
+    // Y starts at 0 (the floor) and goes UP only — no negative Y lines.
+    {
+        std::vector<float> verts;
+        verts.reserve((halfSize + 1) * 4 * 3);
 
-    glGenVertexArrays(1, &vaoGrid);
-    glGenBuffers     (1, &vboGrid);
+        for (int i = -halfSize; i <= halfSize; ++i)
+        {
+            const float fi = static_cast<float>(i);
+            // X-parallel (horizontal) lines: only y >= 0
+            verts.insert(verts.end(), { -fH, fi, 0.f });
+            verts.insert(verts.end(), {  fH, fi, 0.f });
+            // Y-parallel (vertical) lines
+            verts.insert(verts.end(), { fi, 0.f, 0.f });
+            verts.insert(verts.end(), { fi, fH,  0.f });
+        }
+        planeXYVertCount = uploadLineMesh(vaoPlaneXY, vboPlaneXY, verts);
+    }
 
-    glBindVertexArray(vaoGrid);
-    glBindBuffer(GL_ARRAY_BUFFER, vboGrid);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_STATIC_DRAW);
+    // ── YZ wall (x = 0, vertical) ────────────────────────────────────────────
+    {
+        std::vector<float> verts;
+        verts.reserve((halfSize + 1) * 4 * 3);
 
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
+        for (int i = -halfSize; i <= halfSize; ++i)
+        {
+            const float fi = static_cast<float>(i);
+            // Z-parallel (horizontal) lines
+            verts.insert(verts.end(), { 0.f, fi, -fH });
+            verts.insert(verts.end(), { 0.f, fi,  fH });
+            // Y-parallel (vertical) lines
+            verts.insert(verts.end(), { 0.f, 0.f, fi });
+            verts.insert(verts.end(), { 0.f, fH,  fi });
+        }
+        planeYZVertCount = uploadLineMesh(vaoPlaneYZ, vboPlaneYZ, verts);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildArrowMeshes  –  one solid arrow (shaft + cone tip) per axis
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Geometry is generated CPU-side so we can keep the cheap unlit shader (no
+// model matrix uniform needed).  Each axis gets its own VBO rotated so that
+// the shaft points along the desired axis, starting at the local origin.
+//
+// Total triangles per arrow ≈ 8 shaft sides * 2 + 8 cone base + 1 cap = ~25.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Renderer::buildArrowMeshes()
+{
+    constexpr int   kSegments  = 10;
+    constexpr float kLength    = 1.0f;   // total length along the axis
+    constexpr float kShaftLen  = 0.70f;
+    constexpr float kShaftRad  = 0.045f;
+    constexpr float kHeadRad   = 0.13f;
+
+    // First build the arrow oriented along +X (shaft from (0,0,0) to (kShaftLen,0,0)
+    // and a cone tip ending at (kLength,0,0)).  Then we'll rotate.
+
+    std::vector<float> base;   // flat list of xyz triples (triangles)
+    base.reserve(kSegments * 6 * 3);
+
+    auto pushTri = [&](float ax, float ay, float az,
+                       float bx, float by, float bz,
+                       float cx, float cy, float cz)
+    {
+        base.push_back(ax); base.push_back(ay); base.push_back(az);
+        base.push_back(bx); base.push_back(by); base.push_back(bz);
+        base.push_back(cx); base.push_back(cy); base.push_back(cz);
+    };
+
+    // Shaft: cylinder side as a triangle strip unrolled into pairs of triangles.
+    // Local +X is the axial direction, Y and Z are the radial.
+    for (int i = 0; i < kSegments; ++i)
+    {
+        const float a0 = juce::MathConstants<float>::twoPi * (float) i       / kSegments;
+        const float a1 = juce::MathConstants<float>::twoPi * (float)(i + 1)  / kSegments;
+        const float y0 = std::cos(a0) * kShaftRad, z0 = std::sin(a0) * kShaftRad;
+        const float y1 = std::cos(a1) * kShaftRad, z1 = std::sin(a1) * kShaftRad;
+
+        pushTri(0.f, y0, z0,  kShaftLen, y0, z0,  kShaftLen, y1, z1);
+        pushTri(0.f, y0, z0,  kShaftLen, y1, z1,  0.f,        y1, z1);
+    }
+
+    // Cone tip: base circle at x=kShaftLen radius=kHeadRad, apex at x=kLength.
+    for (int i = 0; i < kSegments; ++i)
+    {
+        const float a0 = juce::MathConstants<float>::twoPi * (float) i       / kSegments;
+        const float a1 = juce::MathConstants<float>::twoPi * (float)(i + 1)  / kSegments;
+        const float y0 = std::cos(a0) * kHeadRad, z0 = std::sin(a0) * kHeadRad;
+        const float y1 = std::cos(a1) * kHeadRad, z1 = std::sin(a1) * kHeadRad;
+
+        // Side
+        pushTri(kShaftLen, y0, z0,  kLength, 0.f, 0.f,  kShaftLen, y1, z1);
+        // Base cap (so the cone looks closed when viewed from below)
+        pushTri(kShaftLen, 0.f, 0.f,  kShaftLen, y1, z1,  kShaftLen, y0, z0);
+    }
+
+    // Rotate the +X arrow into +Y and +Z.  Each axis gets a fresh vertex list.
+    auto rotate = [&](int axis, std::vector<float>& out)
+    {
+        out.resize(base.size());
+        for (size_t i = 0; i + 2 < base.size(); i += 3)
+        {
+            const float x = base[i + 0], y = base[i + 1], z = base[i + 2];
+            switch (axis)
+            {
+                case 0:  // +X (identity)
+                    out[i] = x; out[i + 1] = y; out[i + 2] = z;
+                    break;
+                case 1:  // +Y : (x, y, z) -> (-y, x, z)  rotates +X to +Y around +Z
+                    out[i] = -y; out[i + 1] = x; out[i + 2] = z;
+                    break;
+                case 2:  // +Z : (x, y, z) -> (z, y, -x)  rotates +X to +Z around +Y
+                    out[i] = z; out[i + 1] = y; out[i + 2] = -x;
+                    break;
+            }
+        }
+    };
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        std::vector<float> v;
+        rotate(axis, v);
+
+        glGenVertexArrays(1, &vaoArrow[axis]);
+        glGenBuffers     (1, &vboArrow[axis]);
+
+        glBindVertexArray(vaoArrow[axis]);
+        glBindBuffer(GL_ARRAY_BUFFER, vboArrow[axis]);
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(v.size() * sizeof(float)),
+                     v.data(), GL_STATIC_DRAW);
+
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glBindVertexArray(0);
+
+        arrowVertCount[axis] = static_cast<int>(v.size() / 3);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -475,18 +643,81 @@ void Renderer::renderSolidBlock(const Mat4& vp, const Vec3f& lightDir,
 // renderGrid  –  horizontal reference grid at y = 0
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Legacy single-plane entry point — equivalent to renderPlaneXZ().
 void Renderer::renderGrid(const Mat4& vp)
 {
-    if (!progUnlit || gridVertCount == 0) return;
+    renderPlaneXZ(vp);
+}
+
+namespace
+{
+    inline void drawLinePlane(GLuint prog, GLint uVP, GLint uColor, GLint uOff,
+                              const Mat4& vp, const Vec3f& color,
+                              GLuint vao, int vertCount)
+    {
+        if (!prog || vertCount == 0) return;
+        glUseProgram(prog);
+        glUniformMatrix4fv(uVP, 1, GL_FALSE, vp.m);
+        glUniform3f(uColor, color.x, color.y, color.z);
+        glUniform3f(uOff, 0.f, 0.f, 0.f);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_LINES, 0, vertCount);
+        glBindVertexArray(0);
+    }
+}
+
+void Renderer::renderPlaneXZ(const Mat4& vp)
+{
+    drawLinePlane(progUnlit, uVP_unlit, uColor_unlit, uOffset,
+                  vp, { 0.30f, 0.30f, 0.35f },
+                  vaoPlaneXZ, planeXZVertCount);
+}
+
+void Renderer::renderPlaneXY(const Mat4& vp)
+{
+    drawLinePlane(progUnlit, uVP_unlit, uColor_unlit, uOffset,
+                  vp, { 0.30f, 0.20f, 0.35f },     // faint magenta tint (Z-facing)
+                  vaoPlaneXY, planeXYVertCount);
+}
+
+void Renderer::renderPlaneYZ(const Mat4& vp)
+{
+    drawLinePlane(progUnlit, uVP_unlit, uColor_unlit, uOffset,
+                  vp, { 0.35f, 0.20f, 0.20f },     // faint red tint (X-facing)
+                  vaoPlaneYZ, planeYZVertCount);
+}
+
+void Renderer::renderArrow(const Mat4& vp, const Vec3f& origin,
+                           int axis, float length,
+                           const Vec3f& color, bool highlighted)
+{
+    if (!progUnlit) return;
+    axis = juce::jlimit(0, 2, axis);
+    if (arrowVertCount[axis] == 0) return;
 
     glUseProgram(progUnlit);
     glUniformMatrix4fv(uVP_unlit, 1, GL_FALSE, vp.m);
-    glUniform3f(uColor_unlit, 0.30f, 0.30f, 0.35f);   // subtle grey
-    glUniform3f(uOffset, 0.f, 0.f, 0.f);
 
-    glBindVertexArray(vaoGrid);
-    glDrawArrays(GL_LINES, 0, gridVertCount);
+    // The base mesh is unit-length (1.0).  We don't have a model-matrix uniform,
+    // so for a quick first cut we just translate to @p origin and accept the
+    // unit length.  The caller picks a sensible @p length that's already baked
+    // into the call site; if you need variable-length arrows, swap this for a
+    // per-axis pre-scaled VBO or extend the shader.  For now we use length to
+    // brighten/dim if needed.
+    juce::ignoreUnused(length);
+
+    const float boost = highlighted ? 0.35f : 0.0f;
+    glUniform3f(uColor_unlit,
+                juce::jmin(1.f, color.x + boost),
+                juce::jmin(1.f, color.y + boost),
+                juce::jmin(1.f, color.z + boost));
+    glUniform3f(uOffset, origin.x, origin.y, origin.z);
+
+    glDisable(GL_CULL_FACE);     // cone tip flips winding on far side
+    glBindVertexArray(vaoArrow[axis]);
+    glDrawArrays(GL_TRIANGLES, 0, arrowVertCount[axis]);
     glBindVertexArray(0);
+    glEnable(GL_CULL_FACE);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

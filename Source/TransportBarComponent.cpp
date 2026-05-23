@@ -46,22 +46,13 @@ TransportBarComponent::TransportBarComponent()
             onStop();
     };
 
-    // ── Speed button (cycles 1x → 2x → 3x → 1x) ──────────────────────────────
+    // ── Speed button (popup menu: 0.25x / 0.5x / 0.75x / 1x / 2x / 3x) ───────
     speedButton_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff333344));
     speedButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
-    speedButton_.setTooltip("Playback speed");
+    speedButton_.setTooltip("Playback speed (change before or during playback)");
+    speedButton_.setButtonText(formatSpeedLabel(kSpeedRates[speedIndex_]));
 
-    speedButton_.onClick = [this]
-    {
-        constexpr int n = (int) (sizeof(kSpeedRates) / sizeof(kSpeedRates[0]));
-        speedIndex_ = (speedIndex_ + 1) % n;
-
-        const double rate = kSpeedRates[speedIndex_];
-        speedButton_.setButtonText(juce::String((int) rate) + "x");
-
-        if (onSpeedChanged)
-            onSpeedChanged(rate);
-    };
+    speedButton_.onClick = [this] { showSpeedMenu(); };
 
     // ── Time label ────────────────────────────────────────────────────────────
     timeLabel.setFont(juce::Font(14.0f, juce::Font::bold));
@@ -316,7 +307,8 @@ void TransportBarComponent::resized()
 
     playPauseButton.setBounds(controlStrip.removeFromLeft(65).reduced(6, 5));
     stopButton.setBounds(controlStrip.removeFromLeft(65).reduced(6, 5));
-    speedButton_.setBounds(controlStrip.removeFromLeft(55).reduced(6, 5));
+    // 70 px gives "0.75x" comfortable headroom; cycling-only versions were 55.
+    speedButton_.setBounds(controlStrip.removeFromLeft(70).reduced(6, 5));
 
     timeLabel.setBounds(controlStrip.removeFromLeft(170).reduced(6, 5));
 
@@ -355,6 +347,50 @@ void TransportBarComponent::resized()
 void TransportBarComponent::setBlocks(const std::vector<BlockEntry>& blocks)
 {
     timeline.setBlocks(blocks);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+juce::String TransportBarComponent::formatSpeedLabel(double rate)
+{
+    // "0.25x", "0.5x", "0.75x", "1x", "2x", "3x" — drop trailing ".0" for whole
+    // numbers so the button stays compact at small widths.
+    if (std::abs(rate - std::round(rate)) < 0.001)
+        return juce::String((int) std::round(rate)) + "x";
+
+    return juce::String(rate, 2).trimCharactersAtEnd("0") + "x";
+}
+
+void TransportBarComponent::showSpeedMenu()
+{
+    juce::PopupMenu menu;
+
+    for (int i = 0; i < kSpeedCount; ++i)
+    {
+        const bool isCurrent = (i == speedIndex_);
+        menu.addItem(juce::PopupMenu::Item(formatSpeedLabel(kSpeedRates[i]))
+                        .setTicked(isCurrent)
+                        .setID(i + 1));   // PopupMenu IDs must be > 0
+    }
+
+    juce::PopupMenu::Options opts;
+    opts = opts.withTargetComponent(&speedButton_)
+               .withMinimumWidth(speedButton_.getWidth());
+
+    menu.showMenuAsync(opts, [this](int result)
+    {
+        if (result <= 0) return;   // dismissed
+
+        const int idx = juce::jlimit(0, kSpeedCount - 1, result - 1);
+
+        speedIndex_ = idx;
+        const double rate = kSpeedRates[idx];
+
+        speedButton_.setButtonText(formatSpeedLabel(rate));
+
+        if (onSpeedChanged)
+            onSpeedChanged(rate);
+    });
 }
 
 

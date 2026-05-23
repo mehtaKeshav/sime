@@ -36,6 +36,7 @@ target_sources(SIME PRIVATE
     Source/TimelineComponent.cpp
     Source/SoundLibrary.cpp
     Source/SoundPickerComponent.cpp
+    Source/AudioAnalysis.cpp
 )
 
 target_compile_definitions(SIME PRIVATE

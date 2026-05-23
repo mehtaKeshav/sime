@@ -58,8 +58,18 @@ public:
     void renderSolidBlock(const Mat4& vp, const Vec3f& lightDir,
                           const Vec3i& pos, const Vec3f& color);
 
-    /// Draw the reference grid at y = 0.
+    /// Draw the horizontal XZ reference grid at y = 0 (the "floor").
+    /// Kept for back-compat — equivalent to renderPlaneXZ.
     void renderGrid(const Mat4& vp);
+
+    /// Draw the horizontal floor plane (lines along X and Z at y = 0).
+    void renderPlaneXZ(const Mat4& vp);
+
+    /// Draw the vertical "wall Z" plane (lines along X and Y at z = 0).
+    void renderPlaneXY(const Mat4& vp);
+
+    /// Draw the vertical "wall X" plane (lines along Y and Z at x = 0).
+    void renderPlaneYZ(const Mat4& vp);
 
     /// Draw a wireframe cube at `pos` (integer grid coordinates).
     /// color : {r,g,b} in [0,1]
@@ -69,18 +79,36 @@ public:
     /// Draw the permanent red origin marker at (0,0,0).
     void renderOriginMarker(const Mat4& vp, const Vec3f& lightDir);
 
+    /// Draw a Blender-style move arrow originating at @p origin (world space)
+    /// pointing along @p axis (0=X, 1=Y, 2=Z) with the given length.
+    /// `highlighted` brightens the color so the user knows it's hoverable.
+    void renderArrow(const Mat4& vp, const Vec3f& origin,
+                     int axis, float length,
+                     const Vec3f& color, bool highlighted);
+
 private:
     // ── VAO / VBO handles ─────────────────────────────────────────────────────
 
-    GLuint vaoVoxels = 0,    vboVoxels    = 0;
-    GLuint vaoGrid   = 0,    vboGrid      = 0;
-    GLuint vaoWire   = 0,    vboWire      = 0;
-    GLuint vaoCube   = 0,    vboCube      = 0;   // origin marker
+    GLuint vaoVoxels  = 0, vboVoxels  = 0;
+    GLuint vaoPlaneXZ = 0, vboPlaneXZ = 0;
+    GLuint vaoPlaneXY = 0, vboPlaneXY = 0;
+    GLuint vaoPlaneYZ = 0, vboPlaneYZ = 0;
+    GLuint vaoWire    = 0, vboWire    = 0;
+    GLuint vaoCube    = 0, vboCube    = 0;   // origin marker
 
-    int voxelVertCount = 0;
-    int gridVertCount  = 0;
-    int wireVertCount  = 0;
-    int cubeVertCount  = 0;
+    // One arrow mesh per axis (CPU-rotated at build time so we don't need a
+    // model matrix in the shader).  Each mesh is a thin cylinder shaft + a
+    // cone tip, drawn as triangles.
+    GLuint vaoArrow[3] {};
+    GLuint vboArrow[3] {};
+    int    arrowVertCount[3] {};
+
+    int voxelVertCount   = 0;
+    int planeXZVertCount = 0;
+    int planeXYVertCount = 0;
+    int planeYZVertCount = 0;
+    int wireVertCount    = 0;
+    int cubeVertCount    = 0;
 
     // ── Shader programs ───────────────────────────────────────────────────────
 
@@ -100,7 +128,9 @@ private:
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    void buildGridMesh(int halfSize = 40);
+    void buildGridMesh(int halfSize = 40);   ///< Legacy single-plane builder
+    void buildPlaneMeshes(int halfSize = 40);
+    void buildArrowMeshes();
     void buildWireframeCube();
     void buildOriginCube();
 

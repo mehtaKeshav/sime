@@ -31,21 +31,54 @@ namespace
         float  gain            = 1.0f;
         float  pan             = 0.0f;
         float  pitchRate       = 1.0f;
+        float  blockRate       = 1.0f;
+        float  dopplerRate     = 1.0f;
         float  leftGain        = 1.0f;
         float  rightGain       = 1.0f;
+        bool   loopBuffer      = false;
+        float  loopGapSamples  = 0.0f;
+        float  loopGapRemaining = 0.0f;
+
+        float  posX = 0.f, posY = 0.f, posZ = 0.f;
+        float  velX = 0.f, velY = 0.f, velZ = 0.f;
 
         const juce::AudioBuffer<float>* buffer = nullptr;
 
         bool isFinished() const noexcept
         {
-            return buffer == nullptr
-                || static_cast<int>(samplePositionF) >= buffer->getNumSamples();
+            if (buffer == nullptr) return true;
+            if (loopBuffer)        return false;
+            return static_cast<int>(samplePositionF) >= buffer->getNumSamples();
         }
     };
 
+    constexpr float kExportSpeedOfSound = 25.0f;
+    constexpr float kExportListenerX    = 0.0f;
+    constexpr float kExportListenerY    = 0.0f;
+    constexpr float kExportListenerZ    = 0.0f;
+
+    float computeDopplerRate(bool enabled,
+                             float srcX, float srcY, float srcZ,
+                             float vx,   float vy,   float vz)
+    {
+        if (!enabled) return 1.0f;
+        const float dx = kExportListenerX - srcX;
+        const float dy = kExportListenerY - srcY;
+        const float dz = kExportListenerZ - srcZ;
+        const float distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq < 1e-4f) return 1.0f;
+        const float invDist = 1.0f / std::sqrt(distSq);
+        const float vRadial = (vx * dx + vy * dy + vz * dz) * invDist;
+        const float denom = juce::jmax(kExportSpeedOfSound * 0.4f,
+                                       kExportSpeedOfSound - vRadial);
+        return juce::jlimit(0.5f, 2.0f, kExportSpeedOfSound / denom);
+    }
+
     void handleStartEvent(const SequencerEvent&                            ev,
                           std::vector<MixerVoice>&                         voices,
-                          const std::unordered_map<int, juce::AudioBuffer<float>>& lib)
+                          const std::unordered_map<int, juce::AudioBuffer<float>>& lib,
+                          bool                                              dopplerEnabled,
+                          double                                            writerSampleRate)
     {
         auto it = lib.find(ev.soundId);
         if (it == lib.end())
@@ -56,6 +89,21 @@ namespace
         voice.soundId         = ev.soundId;
         voice.samplePositionF = 0.0f;
         voice.buffer          = &it->second;
+        voice.loopBuffer      = ev.loopBuffer;
+        voice.blockRate       = juce::jlimit(0.1f, 8.0f, ev.playbackRateOverride);
+        voice.loopGapSamples  = std::max(0.0f,
+                                         ev.loopBufferSec * static_cast<float>(writerSampleRate));
+        voice.loopGapRemaining = 0.0f;
+
+        voice.posX = ev.blockX;
+        voice.posY = ev.blockY;
+        voice.posZ = ev.blockZ;
+        voice.velX = ev.hasVelocity ? ev.velocityX : 0.0f;
+        voice.velY = ev.hasVelocity ? ev.velocityY : 0.0f;
+        voice.velZ = ev.hasVelocity ? ev.velocityZ : 0.0f;
+        voice.dopplerRate = computeDopplerRate(dopplerEnabled,
+                                               voice.posX, voice.posY, voice.posZ,
+                                               voice.velX, voice.velY, voice.velZ);
 
         constexpr float refDist = 5.0f;
         const float dist = std::abs(ev.blockZ);
@@ -82,7 +130,9 @@ namespace
         }
     }
 
-    void handleMovementEvent(const SequencerEvent& ev, std::vector<MixerVoice>& voices)
+    void handleMovementEvent(const SequencerEvent& ev,
+                             std::vector<MixerVoice>& voices,
+                             bool dopplerEnabled)
     {
         for (auto& voice : voices)
         {
@@ -96,6 +146,19 @@ namespace
                 const float rightGain = (1.0f + pan) * 0.5f;
                 voice.leftGain  = voice.gain * leftGain;
                 voice.rightGain = voice.gain * rightGain;
+
+                voice.posX = ev.blockX;
+                voice.posY = ev.blockY;
+                voice.posZ = ev.blockZ;
+                if (ev.hasVelocity)
+                {
+                    voice.velX = ev.velocityX;
+                    voice.velY = ev.velocityY;
+                    voice.velZ = ev.velocityZ;
+                }
+                voice.dopplerRate = computeDopplerRate(dopplerEnabled,
+                                                       voice.posX, voice.posY, voice.posZ,
+                                                       voice.velX, voice.velY, voice.velZ);
             }
         }
     }
@@ -120,18 +183,20 @@ namespace
     void dispatchEvents(const std::vector<SequencerEvent>& events,
                         std::vector<BlockEntry>&           blocks,
                         std::vector<MixerVoice>&           voices,
-                        const std::unordered_map<int, juce::AudioBuffer<float>>& lib)
+                        const std::unordered_map<int, juce::AudioBuffer<float>>& lib,
+                        bool                                dopplerEnabled,
+                        double                              writerSampleRate)
     {
         for (const auto& ev : events)
         {
             applyMovementToBlocks(ev, blocks);
 
             if (ev.type == SequencerEventType::Start)
-                handleStartEvent(ev, voices, lib);
+                handleStartEvent(ev, voices, lib, dopplerEnabled, writerSampleRate);
             else if (ev.type == SequencerEventType::Stop)
                 handleStopEvent(ev, voices);
             else if (ev.type == SequencerEventType::Movement)
-                handleMovementEvent(ev, voices);
+                handleMovementEvent(ev, voices, dopplerEnabled);
         }
     }
 
@@ -149,16 +214,39 @@ namespace
 
             const int totalSrc = voice.buffer->getNumSamples();
 
+            const float step = voice.pitchRate * voice.blockRate * voice.dopplerRate;
+
             for (int i = 0; i < n; ++i)
             {
-                const int srcIdx = static_cast<int>(voice.samplePositionF);
+                if (voice.loopBuffer && voice.loopGapRemaining > 0.0f)
+                {
+                    voice.loopGapRemaining -= 1.0f;
+                    continue;
+                }
+
+                int srcIdx = static_cast<int>(voice.samplePositionF);
                 if (srcIdx >= totalSrc)
-                    break;
+                {
+                    if (!voice.loopBuffer)
+                        break;
+
+                    if (voice.loopGapSamples > 0.0f)
+                    {
+                        voice.loopGapRemaining = voice.loopGapSamples;
+                        voice.samplePositionF  = 0.0f;
+                        continue;
+                    }
+
+                    voice.samplePositionF = std::fmod(voice.samplePositionF,
+                                                     static_cast<float>(totalSrc));
+                    srcIdx = static_cast<int>(voice.samplePositionF);
+                    if (srcIdx >= totalSrc) break;
+                }
 
                 const float sample = voice.buffer->getSample(0, srcIdx);
                 outL[i] += sample * voice.leftGain;
                 outR[i] += sample * voice.rightGain;
-                voice.samplePositionF += voice.pitchRate;
+                voice.samplePositionF += step;
             }
         }
 
@@ -311,6 +399,17 @@ bool bounceToFile(const std::vector<BlockEntry>&                            bloc
     clock.seekTo(0.0);
     clock.start();
 
+    // Phase 1: cache each block's sample length so Stretch / Speed modes
+    // compute the correct rate during offline rendering (mirrors the live
+    // GL render path).  `rate` here is the writer sample rate.
+    for (auto& b : blocks)
+    {
+        auto itLib = sampleLibrary.find(b.soundId);
+        b.sampleNaturalDurationSec = (itLib != sampleLibrary.end() && rate > 0.0)
+            ? (itLib->second.getNumSamples() / rate)
+            : 0.0;
+    }
+
     SequencerEngine sequencer;
     std::vector<MixerVoice> voices;
     voices.reserve(64);
@@ -327,8 +426,15 @@ bool bounceToFile(const std::vector<BlockEntry>&                            bloc
         const double dt = static_cast<double>(thisBlock) / rate;
         clock.update(dt);
 
+        // Exports honour the per-block isMuted flag but ignore the per-type
+        // toolbar filter — those are view conveniences, not musical intent.
+        for (auto& bk : blocks)
+            bk.effectiveMuted = bk.isMuted;
+
         const auto events = sequencer.update(clock, blocks);
-        dispatchEvents(events, blocks, voices, sampleLibrary);
+        // Doppler ignored in export (matches the live default-off behaviour).
+        dispatchEvents(events, blocks, voices, sampleLibrary,
+                       /*dopplerEnabled*/ false, rate);
 
         if (thisBlock == kChunkSamples)
             mixChunk(chunk, voices);

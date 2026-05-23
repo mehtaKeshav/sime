@@ -4,6 +4,8 @@
 #include "MathUtils.h"
 #include <optional>
 #include "BlockEntry.h"
+#include "AudioAnalysis.h"
+#include <functional>
 
 class SidebarComponent : public juce::Component
 {
@@ -25,6 +27,8 @@ public:
     juce::TextButton blockListButton { "Blocks" };
     juce::TextButton infoButton { "Info" };
     void resized() override;
+    void mouseWheelMove(const juce::MouseEvent&,
+                        const juce::MouseWheelDetails&) override;
     std::function<void(bool)> onCollapsedChanged;
 
     void setCollapsed(bool shouldCollapse);
@@ -35,6 +39,12 @@ public:
 
     void showBlockInfo(const BlockEntry& block, const juce::String& displayName = {});
 
+    /// Called from MainComponent to resolve sample buffers for analysis.
+    void setAudioAnalyzer(std::function<AudioAnalysisResult(const BlockEntry&)> fn)
+    {
+        audioAnalyzer_ = std::move(fn);
+    }
+
     /// Drop the currently shown block info (used when the scene is cleared
     /// or a new scene is loaded — otherwise stale info from the previous
     /// scene keeps showing in the Info panel).
@@ -44,13 +54,35 @@ public:
     /// was deleted from the viewport or timeline).
     void clearSelectedBlockIfSerial(int serial);
 
+    /// Copy of the block currently shown in the Info panel (if any).
+    std::optional<BlockEntry> getSelectedBlockCopy() const { return selectedBlock_; }
+
+    /// Callback fired when the user clicks Apply.  Carries every editable
+    /// field on the Info panel.  `playbackMode` is a uint8_t so the header
+    /// doesn't have to pull in BlockEntry.h transitively for downstream
+    /// callers that only forward the value.
     std::function<void(
-        int serial,
-        Vec3i newPos,
-        double newStart,
-        double newDuration,
-        bool movementEnabled
+        int     serial,
+        Vec3i   newPos,
+        double  newStart,
+        double  newDuration,
+        bool    movementEnabled,
+        uint8_t playbackMode,
+        double  movementDurationSec,
+        int     movementYOffset,
+        bool    isMuted,
+        bool    isHidden,
+        double  loopBufferSec,
+        bool    isLooping,
+        double  loopDurationSec,
+        double  muteStartSec,
+        double  muteEndSec
     )> onApplyBlockInfo;
+
+    /// Fired when the user clicks "Match Duration to Sound" in the Info panel.
+    /// Receives the serial of the currently shown block; ViewPortComponent
+    /// resolves the sample length and updates the region duration.
+    std::function<void(int serial)> onMatchDurationToSound;
     
 private:
     bool collapsed = false;
@@ -62,6 +94,13 @@ private:
 
     bool blockListOpen = true;
     int blockListScroll = 0;
+
+    /// Scroll offset for the Info panel content (rows / graphs between the
+    /// tab header and the bottom Apply / Reset buttons).
+    int infoScrollY_         = 0;
+    int infoContentBottomY_  = 0;   ///< Updated by resized()
+    int infoScrollAreaTop_   = 0;
+    int infoScrollAreaBot_   = 0;
 
     static constexpr int kRowH = 20;
     static constexpr int kHeaderH = 26;
@@ -78,8 +117,36 @@ private:
     juce::TextEditor durationEditor;
 
     juce::ToggleButton movementEnabledToggle { "Enable Recorded Movement" };
-    juce::TextButton applyButton { "Apply" };
+
+    // Phase 1 movement controls
+    juce::ComboBox    modeCombo_;                            ///< Playback mode
+    juce::TextEditor  movementDurationEditor_;               ///< 0 = use region duration
+    juce::TextEditor  pathYOffsetEditor_;                    ///< Lift the recorded path
+
+    // Loop controls (moved from BlockEditPopup so they live next to the gap)
+    juce::ToggleButton loopToggle_       { "Loop sound" };
+    juce::TextEditor   loopDurationEditor_;                  ///< 0 = full region
+    juce::TextButton   matchLoopDurBtn_  { "Loop = Block Dur." };
+    juce::TextEditor   loopBufferEditor_;                    ///< Silence between repeats (s)
+
+    // Per-block flags
+    juce::ToggleButton muteToggle_   { "Mute (no audio, forever)" };
+    juce::ToggleButton hideToggle_   { "Hide block in viewport" };
+
+    // Time-window mute (silence the block while the playhead is inside)
+    juce::TextEditor  muteStartEditor_;
+    juce::TextEditor  muteEndEditor_;
+
+    // One-click: match the block's region duration to the loaded sample length
+    juce::TextButton matchSoundDurBtn_ { "Match Duration to Sound" };
+
+    juce::TextButton applyButton      { "Apply" };
+    juce::TextButton resetDefaultsBtn_{ "Reset to Default" };
     void movementGraph(juce::Graphics& g, const BlockEntry& selectedBlock, juce::Rectangle<int> graphArea);
+    void audioWaveformGraph(juce::Graphics& g, juce::Rectangle<int> area) const;
+
+    std::function<AudioAnalysisResult(const BlockEntry&)> audioAnalyzer_;
+    AudioAnalysisResult audioAnalysis_;
 
     class TabLookAndFeel : public juce::LookAndFeel_V4
     {

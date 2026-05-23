@@ -51,7 +51,6 @@ public:
 
 private:
     void commit();
-    void updateLoopFieldEnabled();   ///< Greys out loop duration when toggle is off
 
     int       editingSerial = -1;
     BlockType editingType   = BlockType::Violin;
@@ -67,21 +66,20 @@ private:
 
     juce::Label      fileLabel;
     juce::TextEditor fileField;
-    juce::TextButton browseButton { "Browse…" };
+    juce::TextButton browseButton { "Browse File" };
     juce::String     customFilePath_;
 
     std::unique_ptr<juce::FileChooser> fileChooser_;
 
-    // ── Loop controls ─────────────────────────────────────────────────────────
-    juce::ToggleButton loopButton    { "Loop" };
-    juce::Label        loopDurationLabel;
-    juce::TextEditor   loopDurationField;
+    // ── Loop state — passed through unchanged (controls live in Block Info) ─
+    bool   incomingIsLooping       = false;
+    double incomingLoopDurationSec = 4.0;
 
     juce::TextButton applyButton  { "Apply"  };
     juce::TextButton cancelButton { "Cancel" };
 
     static constexpr int kWidth  = 440;
-    static constexpr int kHeight = 560;   // bumped from 520 to fit the loop row
+    static constexpr int kHeight = 520;
     static constexpr int kPad    = 14;
     static constexpr int kRowH   = 28;
     static constexpr int kLabelW = 80;

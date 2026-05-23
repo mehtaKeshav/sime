@@ -27,6 +27,37 @@ struct MovementKeyFrame
     Vec3i  position;  // Absolute world position at this keyframe
 };
 
+/// Per-block playback behaviour for the WAV vs the block's region duration.
+///
+/// Natural  – sound plays once; if shorter than the region, the rest is silent.
+/// Loop     – sound buffer loops continuously inside the audio thread until the
+///            region's stop event fires.  Closes the "2 seconds won't play"
+///            gap that the old sequencer-retrigger loop had.
+/// Stretch  – sound is slowed (rate < 1) so it fills the whole region.  Pitch
+///            drops as a side effect — true pitch-preserving time-stretch
+///            (WSOLA / phase vocoder) is a future feature.
+/// Speed    – sound is sped up (rate > 1) to finish inside the region.  Pitch
+///            rises as a side effect, same caveat as Stretch.
+enum class BlockPlaybackMode : uint8_t
+{
+    Natural = 0,
+    Loop    = 1,
+    Stretch = 2,
+    Speed   = 3
+};
+
+inline const char* blockPlaybackModeName(BlockPlaybackMode m) noexcept
+{
+    switch (m)
+    {
+        case BlockPlaybackMode::Natural: return "Natural";
+        case BlockPlaybackMode::Loop:    return "Loop";
+        case BlockPlaybackMode::Stretch: return "Stretch (slow)";
+        case BlockPlaybackMode::Speed:   return "Speed (fast)";
+    }
+    return "Natural";
+}
+
 struct TimeRange
 {
     double startTimeSec = 0.0;
@@ -76,9 +107,39 @@ struct BlockEntry
     std::vector<TimeRange> timesList;
 
     // ── Loop ──────────────────────────────────────────────────────────────────
-    bool   isLooping           = false;  ///< When true, re-trigger every durationSec
-    double loopDurationSec     = 4.0;    ///< Total wallclock seconds the loop runs
-    int    loopIterationsFired = 0;      ///< Runtime: count of Start events fired this play
+    // LEGACY (kept for old .sime file back-compat).  New code should use
+    // playbackMode == BlockPlaybackMode::Loop instead.  Load reconstructs the
+    // mode from these fields; save writes both so older builds still parse.
+    bool   isLooping           = false;
+    double loopDurationSec     = 4.0;
+    int    loopIterationsFired = 0;      ///< Runtime: legacy retrigger counter
+
+    // ── Playback behaviour (Phase 1 movement work) ───────────────────────────
+    BlockPlaybackMode playbackMode      = BlockPlaybackMode::Natural;
+
+    /// Movement playback length, in seconds.  0 = use the block's own region
+    /// duration (durationSec).  Lets the user prolong the motion path without
+    /// changing the audio region width.
+    double            movementDurationSec = 0.0;
+
+    /// World-space Y offset applied to every recorded keyframe when playing
+    /// back movement.  Lets the user lift / lower the whole recorded path
+    /// after the fact, without re-recording (initial motion capture is still
+    /// XZ + Shift+scroll).
+    int               movementYOffset     = 0;
+
+    /// Returns the effective movement duration in seconds — `movementDurationSec`
+    /// if > 0, otherwise the block's region `durationSec`.
+    double effectiveMovementDuration() const noexcept
+    {
+        return movementDurationSec > 0.001 ? movementDurationSec : durationSec;
+    }
+
+    /// Natural length of the WAV sample assigned to this block, in seconds.
+    /// Cached by the GL render path each time the sample library changes; the
+    /// SequencerEngine reads it to compute Stretch / Speed rates.  0 means
+    /// "unknown" (rate falls back to 1.0).
+    double sampleNaturalDurationSec = 0.0;
 
     // Recording state
     bool isRecordingMovement = false;
@@ -86,9 +147,56 @@ struct BlockEntry
     Vec3i recordingStartPos;
 
     // recorded movement data
-    bool hasRecordedMovement = false; ///< Whether this block has any recorded movement keyframes
+    bool hasRecordedMovement = false; ///< Block has a saved movement path (keyframes on disk)
+    bool movementEnabled     = true;  ///< When false, path is kept but not played during transport
     std::vector<MovementKeyFrame> recordedMovement; ///< Optional per-block movement path for sequenced motion
     bool durationLocked = false;
+
+    // ── Per-block UI / playback flags (v7) ───────────────────────────────────
+    /// When true the sequencer skips Start / Stop events for this block —
+    /// the path still animates but no audio is emitted.
+    bool isMuted = false;
+
+    /// When true the renderer skips drawing this block (and its highlight /
+    /// arrows).  Selection / sequencing still work — purely a viewport-clean
+    /// helper for composers focusing on a subset of the scene.
+    bool isHidden = false;
+
+    /// When > 0 and the block is in Loop mode, the audio thread inserts this
+    /// many seconds of silence between successive plays of the sample.
+    /// 0 = tight loop (the existing behaviour).
+    double loopBufferSec = 0.0;
+
+    /// Time-window mute (in transport seconds, absolute).  When
+    /// muteEndSec > muteStartSec, the audio engine silences this block while
+    /// the playhead is inside [muteStartSec, muteEndSec).  Movement and other
+    /// state still play.  Both fields default to 0 (window disabled).
+    double muteStartSec = 0.0;
+    double muteEndSec   = 0.0;
+
+    // ── Runtime-only flags (NOT persisted) ───────────────────────────────────
+    /// Re-computed every sequencer tick from
+    ///   isMuted || (per-type indefinite mute toggled by the toolbar).
+    /// SequencerEngine uses this in place of isMuted for the "indefinite"
+    /// silence test; it stays out of SceneFile so the toolbar's transient
+    /// view-state never leaks into saved scenes.
+    bool effectiveMuted = false;
+
+    /// Tracks whether the previous sequencer tick saw this block as muted
+    /// (either indefinite or window).  Used to detect transitions so we can
+    /// cut / resume the live voice mid-region.  Reset in resetPlaybackState().
+    bool wasMutedLastTick = false;
+
+    /// Reset playback-mode fields to factory defaults (does not clear movement
+    /// keyframes or position / timing).
+    void resetPlaybackDefaults() noexcept
+    {
+        playbackMode        = BlockPlaybackMode::Natural;
+        movementDurationSec = 0.0;
+        movementYOffset     = 0;
+        isLooping           = false;
+        loopDurationSec     = 4.0;
+    }
 
     // Playback state for movement
     size_t currentKeyframeIndex = 0;
@@ -139,6 +247,7 @@ struct BlockEntry
         isPlaying   = false;
         currentKeyframeIndex = 0;
         loopIterationsFired  = 0;
+        wasMutedLastTick     = false;
 
         triggeredKeyframes.clear();
         if (hasRecordedMovement && !recordedMovement.empty())

@@ -28,6 +28,14 @@ public:
     /// Reset all block playback state — call after transport stop or loop wrap.
     static void resetAllBlocks(std::vector<BlockEntry>& blocks) noexcept;
 
+    /// Snap each moving block's visual position to where it would be at
+    /// transport time @p timeSec, honouring movementDurationSec and
+    /// movementYOffset.  Used after seek / scrub so blocks jump to the
+    /// correct on-path position without playing audio.  Returns true if any
+    /// block's position changed (so callers can flag the renderer dirty).
+    static bool snapBlockPositionsToTime(std::vector<BlockEntry>& blocks,
+                                         double timeSec) noexcept;
+
 private:
     std::vector<SequencerEvent> eventBuffer_;
 };

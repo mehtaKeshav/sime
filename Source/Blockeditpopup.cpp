@@ -41,13 +41,11 @@ BlockEditPopup::BlockEditPopup()
     styleLabel(durationLabel,     "Duration (s)");
     styleLabel(soundLabel,        "Sound");
     styleLabel(fileLabel,         "File");
-    styleLabel(loopDurationLabel, "Loop (s)");
 
     addAndMakeVisible(startLabel);
     addAndMakeVisible(durationLabel);
     addAndMakeVisible(soundLabel);
     addAndMakeVisible(fileLabel);
-    addAndMakeVisible(loopDurationLabel);
 
     // ── Text editors ──────────────────────────────────────────────────────
     auto styleField = [](juce::TextEditor& f, const juce::String& allowed)
@@ -62,20 +60,16 @@ BlockEditPopup::BlockEditPopup()
         f.setIndents(8, 4);
         f.setInputRestrictions(16, allowed);
     };
-    styleField(startField,        "0123456789.");
-    styleField(durationField,     "0123456789.");
-    styleField(loopDurationField, "0123456789.");
+    styleField(startField,    "0123456789.");
+    styleField(durationField, "0123456789.");
     addAndMakeVisible(startField);
     addAndMakeVisible(durationField);
-    addAndMakeVisible(loopDurationField);
 
-    // ── Loop toggle ───────────────────────────────────────────────────────
-    loopButton.setColour(juce::ToggleButton::textColourId, juce::Colour(0xfff0f2fa));
-    loopButton.setColour(juce::ToggleButton::tickColourId, juce::Colour(kAccentColor));
-    loopButton.setColour(juce::ToggleButton::tickDisabledColourId,
-                         juce::Colour(kFieldBdColor));
-    loopButton.onClick = [this] { updateLoopFieldEnabled(); };
-    addAndMakeVisible(loopButton);
+    // (Loop toggle / Loop-duration controls were moved out of this popup —
+    //  they now live in the sidebar Block Info panel so the loop, gap, and
+    //  duration controls are all in one place.  We still pass through the
+    //  incoming isLooping / loopDurationSec values on commit so the field
+    //  values round-trip cleanly when the user edits start / duration.)
 
     // ── Sound picker ──────────────────────────────────────────────────────
     addAndMakeVisible(soundPicker);
@@ -125,9 +119,8 @@ BlockEditPopup::BlockEditPopup()
     applyButton .onClick = [this] { commit(); };
     cancelButton.onClick = [this] { hide(); if (onCancel) onCancel(); };
 
-    startField       .onReturnKey = [this] { commit(); };
-    durationField    .onReturnKey = [this] { commit(); };
-    loopDurationField.onReturnKey = [this] { commit(); };
+    startField   .onReturnKey = [this] { commit(); };
+    durationField.onReturnKey = [this] { commit(); };
 
     addAndMakeVisible(applyButton);
     addAndMakeVisible(cancelButton);
@@ -153,16 +146,6 @@ void BlockEditPopup::setSoundLibrary(SoundLibrary* lib)
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-void BlockEditPopup::updateLoopFieldEnabled()
-{
-    const bool on = loopButton.getToggleState();
-    loopDurationField.setEnabled(on);
-    loopDurationField.setAlpha(on ? 1.0f : 0.45f);
-    loopDurationLabel.setAlpha(on ? 1.0f : 0.45f);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 void BlockEditPopup::showAt(int blockSerial, BlockType type,
                              double startTime, double duration,
                              int /*soundId*/, const juce::String& customFile,
@@ -183,11 +166,10 @@ void BlockEditPopup::showAt(int blockSerial, BlockType type,
                         badgeColor.getPerceivedBrightness() > 0.55f
                             ? juce::Colour(0xff1a1d26) : juce::Colours::white);
 
-    startField       .setText(juce::String(startTime,       3), false);
-    durationField    .setText(juce::String(duration,        3), false);
-    loopDurationField.setText(juce::String(loopDurationSec, 3), false);
-    loopButton       .setToggleState(isLooping, juce::dontSendNotification);
-    updateLoopFieldEnabled();
+    startField   .setText(juce::String(startTime, 3), false);
+    durationField.setText(juce::String(duration,  3), false);
+    incomingIsLooping       = isLooping;
+    incomingLoopDurationSec = loopDurationSec;
 
     const bool isCustom = (type == BlockType::Custom);
 
@@ -245,8 +227,8 @@ void BlockEditPopup::commit()
 
     const double newStart    = startField   .getText().getDoubleValue();
     const double newDuration = std::max(0.01, durationField.getText().getDoubleValue());
-    const bool   newLooping  = loopButton.getToggleState();
-    const double newLoopDur  = std::max(0.01, loopDurationField.getText().getDoubleValue());
+    const bool   newLooping  = incomingIsLooping;
+    const double newLoopDur  = incomingLoopDurationSec;
 
     int          newSoundId  = -1;
     juce::String newCustomFile;
@@ -322,13 +304,6 @@ void BlockEditPopup::resized()
     startField   .setBounds(kPad + kLabelW + 6, y, halfW, kRowH - 4);
     durationLabel.setBounds(kPad + kLabelW + 6 + halfW + 6, y - 18, halfW, 14);
     durationField.setBounds(kPad + kLabelW + 6 + halfW + 6, y, halfW, kRowH - 4);
-    y += kRowH;
-
-    // Row 2: loop toggle (left column) + loop-duration (right column)
-    const int loopBtnW = kLabelW + 6 + halfW;   // align with start column
-    loopButton       .setBounds(kPad, y, loopBtnW, kRowH - 4);
-    loopDurationLabel.setBounds(kPad + kLabelW + 6 + halfW + 6, y - 18, halfW, 14);
-    loopDurationField.setBounds(kPad + kLabelW + 6 + halfW + 6, y, halfW, kRowH - 4);
     y += kRowH + 4;
 
     if (soundPicker.isVisible())
@@ -343,7 +318,9 @@ void BlockEditPopup::resized()
     else if (fileField.isVisible())
     {
         fileLabel.setBounds(kPad, y, kLabelW, kRowH - 4);
-        const int browseW = 80;
+        // 100 px gives "Browse File" comfortable headroom (was 80, which
+        // truncated to "Browse F…" on some Windows DPI settings).
+        const int browseW = 100;
         fileField   .setBounds(kPad + kLabelW + 6, y,
                                fieldW - browseW - 4, kRowH - 4);
         browseButton.setBounds(kPad + kLabelW + 6 + fieldW - browseW, y,

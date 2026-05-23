@@ -13,16 +13,24 @@ Move a block left or right and the audio pans. Place it higher and the pitch goe
 2. [Rebuilding After a Pull](#rebuilding-after-a-pull)
 3. [Running the App](#running-the-app)
 4. [Controls](#controls)
-5. [Workflow](#workflow)
-6. [Block Movement Recording](#block-movement-recording)
-7. [Save / Load Scenes](#save--load-scenes)
-8. [Export Audio](#export-audio)
-9. [Audio Architecture](#audio-architecture)
-10. [Project Structure](#project-structure)
-11. [Where to Change Things](#where-to-change-things)
-12. [Known Bugs & Issues](#known-bugs--issues)
-13. [Audio library (detailed report)](md%20files/AUDIO_LIBRARY_REPORT.md) — Task 3: 23 block types, CSV index, lazy-loaded WAV picker
-14. [Export audio (detailed report)](md%20files/EXPORT_AUDIO_REPORT.md) — Offline bounce, formats, limitations
+5. [Toolbar](#toolbar)
+6. [Block Info Panel](#block-info-panel)
+7. [Transport](#transport)
+8. [Workflow](#workflow)
+9. [Block Movement Recording](#block-movement-recording)
+10. [Block Playback Modes (Natural / Loop / Stretch / Speed)](#block-playback-modes-natural--loop--stretch--speed)
+11. [Mute, Hide, and Type Filters](#mute-hide-and-type-filters)
+12. [Audio Analysis (frequency & oscilloscope)](#audio-analysis-frequency--oscilloscope)
+13. [Doppler Effect](#doppler-effect)
+14. [Save / Load Scenes](#save--load-scenes)
+15. [Export Audio](#export-audio)
+16. [Audio Architecture](#audio-architecture)
+17. [Project Structure](#project-structure)
+18. [Where to Change Things](#where-to-change-things)
+19. [Known Bugs & Issues](#known-bugs--issues)
+20. [Audio library (detailed report)](md%20files/AUDIO_LIBRARY_REPORT.md) — 23 block types, CSV index, lazy-loaded WAV picker
+21. [Export audio (detailed report)](md%20files/EXPORT_AUDIO_REPORT.md) — Offline bounce, formats, limitations
+22. [Session 2026-05-23 (detailed report)](md%20files/SESSION_2026-05-23_REPORT.md) — Export, movement, gizmos, audio analysis, Doppler, mute / hide / type filters, loop overhaul, persistence v6→v7→v8
 
 ---
 
@@ -169,10 +177,59 @@ All four views look at the origin (0,0,0) from a distance with a slight downward
 |-------|--------|
 | `E` | Toggle edit mode |
 | `RMB` on block (edit mode) | Open block edit popup |
+| `LMB` on block (normal mode) | Select block (Block Info panel updates) |
 | `Alt + LMB` on block (edit mode) | Select block and start movement recording |
+| Click + drag a red/green/blue arrow on the selected block | Move it along that axis (Blender-style gizmo) |
 | Play / Pause / Stop | Transport bar buttons at the bottom |
+| Speed dropdown (transport bar) | 0.25× / 0.5× / 0.75× / 1× / 2× / 3× — selectable before or during playback |
 
-### File menu (top-right)
+> The square (Stop) button rewinds the playhead **and** snaps every block with a recorded movement back to its starting keyframe.  Pause holds in place and audio resumes at the exact sample on play.  Scrubbing the timeline visually snaps blocks to their interpolated position at that time.
+
+---
+
+## Toolbar
+
+The toolbar at the top of the viewport lays out left-to-right as:
+
+```
+[Type pill] [Type dropdown]  …  [Floor] [YZ Wall] [XY Wall] [Arrows] [Doppler]  [Mute ▾] [View ▾] [File ▾]
+```
+
+### Type pill + dropdown (left)
+
+| UI | What it does |
+|----|----------------|
+| **Color pill** | Shows the active instrument name and a swatch in that type’s color. |
+| **Dropdown** | Picks one of **23 block types** grouped by category (Synth, Strings, Woodwinds, Brass, Percussion, Special). This is what the next `LMB` placement will create. |
+
+### View-element toggles (centre-right)
+
+All five are sticky on/off pills.  Defaults: only **Floor** is on.
+
+| Toggle | What it does |
+|--------|--------------|
+| **Floor** | Show the XZ ground plane mesh. |
+| **YZ Wall** | Show the YZ plane (x = 0).  Off by default. |
+| **XY Wall** | Show the XY plane (z = 0).  Off by default. |
+| **Arrows** | Show the 3D gizmo arrows on the selected block.  Off by default. |
+| **Doppler** | Toggle the Doppler-effect pitch shift on moving voices.  Off by default. |
+
+### `Mute ▾` menu
+
+Per-type indefinite mute.  Grouped by category; ticked entries are currently
+silenced.  Shortcuts at the top: **Mute All Types** / **Unmute All Types**.
+A muted type's blocks still animate and emit Movement events — the audio just
+goes silent.  The filter is transient (not saved to `.sime`, not baked into
+exports).
+
+### `View ▾` menu
+
+Per-type visibility filter.  Same grouped layout as Mute.  Hidden blocks are
+skipped by the renderer (mesh **and** highlights) but stay in the scene for
+sequencing / persistence.  Useful for isolating one instrument while
+composing.
+
+### `File ▾` menu
 
 | Item | Action |
 |--------|--------|
@@ -182,18 +239,58 @@ All four views look at the origin (0,0,0) from a distance with a slight downward
 | **Save As…** | Always prompts for a new file name |
 | **Export Audio…** | Bounce the full timeline mix to WAV, FLAC, AIFF, or Ogg Vorbis |
 
-The app also auto-saves to `%APPDATA%/SIME/autosave.sime` when you close it, and auto-loads that scene on the next launch.
+The app also auto-saves to `%APPDATA%/SIME/autosave.sime` when you close it.
+Auto-load on launch was removed so **New Scene always starts empty** —
+use `File → Open Scene…` or your OS file association to load the auto-save
+manually if you want it back.
 
-### Block type toolbar and sound picker (top of viewport)
+---
 
-To the **left** of the **File** button:
+## Block Info Panel
 
-| UI | What it does |
-|----|----------------|
-| **Color pill** | Shows the active instrument name and a swatch in that type’s color. |
-| **Dropdown** | Picks one of **23 block types** grouped by category (Synth, Strings, Woodwinds, Brass, Percussion, Special). This is what the next `LMB` placement will create. |
+Selecting a block (LMB in normal mode) opens the Block Info panel on the
+sidebar.  The panel is scrollable — use the mouse wheel to reach rows below
+the fold.  Apply commits everything atomically.
 
-In **edit mode** (`E`), **RMB** a block to open the edit window. For non-Custom blocks it includes a **search field** and **scrollable list** of samples from `CSV/sound_library.csv` / `Sounds/` (filtered by that block’s type). Type to search (e.g. note, dynamic, articulation). **Double-click** a row to apply immediately, or select and press **Apply**. **Custom** blocks still use **Browse…** for any WAV on disk.
+| Section | Controls |
+|---------|----------|
+| **Identity** | Block type label + serial (e.g. `Violin 12`) |
+| **Position** | `X / Y / Z` editors |
+| **Timing** | `Start (s)` and `Duration (s)` editors |
+| **Movement** | `Enable Recorded Movement` toggle; `Mode` combo (Natural / Loop / Stretch / Speed); `Movement Duration` editor (0 = use region duration); `Path Y lift` integer offset |
+| **Loop** | `Loop sound` toggle; `Loop length (s)` editor + `Loop = Block Dur.` button (one-click match); `Loop gap (s)` editor (silence between repeats) |
+| **Mute / Hide** | `Mute (no audio, forever)` toggle; `Hide block in viewport` toggle; `Mute from / to` (s) editors for a time-window mute |
+| **One-click** | `Match Duration to Sound` — sets region duration to the loaded sample's natural length, preserving any recorded movement span |
+| **Audio analysis** | Pitch line (Hz / note / duration / period) + filled-blue oscilloscope graph for the loaded sample |
+| **Movement map** | Top-down keyframe path graph (when movement is recorded) |
+| **Buttons** | `Apply` (commit) and `Reset to Default` (clear movement-mode fields) |
+
+### Block edit popup (right-click in edit mode)
+
+In **edit mode** (`E`), **RMB** a block to open a floating edit window.  The
+popup is now a focused timing + sound editor — it does **not** carry loop
+controls anymore (they live in the Block Info panel above so loop, length,
+and gap stay together).  For non-Custom blocks it embeds the searchable
+sample list from `CSV/sound_library.csv` / `Sounds/`.  Type a note name
+(e.g. `A4`), dynamic (`forte`), or articulation (`arco`) to filter ~1,500
+samples.  **Double-click** a row to apply immediately, or select + press
+**Apply**.  **Custom** blocks use **Browse File** for any WAV on disk.
+
+---
+
+## Transport
+
+The bottom transport bar holds Play / Pause / Stop plus the **speed
+dropdown** (0.25× / 0.5× / 0.75× / 1× / 2× / 3×).  Speed can be changed
+before or during playback; it scales the transport clock so the whole
+composition accelerates uniformly (no time-stretch artefacts).
+
+* **Play** — start or resume.
+* **Pause** — freeze the audio at the exact sample so resume is seamless.
+* **Stop (square)** — kill all voices, reset the clock to 0, and **snap
+  every block with a recorded path back to its starting keyframe**.
+* **Scrub the timeline** — drag the playhead to seek.  Blocks visually snap
+  to their interpolated keyframe position at the new time.
 
 Run the app from anywhere (double-clicking `SIME.exe`, Visual Studio **Local Windows Debugger**, or `cd C:\sime` in a terminal). The app finds the **content root** by walking **up** from (1) the current working directory and (2) the folder containing `SIME.exe`, until it sees **both** `Sounds/` and `CSV/sound_library.csv`. Typical layout:
 
@@ -280,6 +377,95 @@ Press `E` to exit edit mode, then press **Play**. The block will travel through 
 - **Duration locking** — after confirming a recording, the block's duration is locked and cannot be edited in the popup. This keeps keyframe timing in sync.
 - **Start time is still editable** — the entire movement path shifts with it; relative timing stays intact.
 - **Movement constraints** — positions must be valid grid cells, within ±40 on X/Z, Y ≥ 0, not occupied by another block, and not the origin `(0,0,0)`.
+- **Movement Duration** — the Block Info panel lets you scale how long the path takes to play out independently of the region duration (0 = follow region).
+- **Path Y lift** — globally raises / lowers every keyframe at playback time without re-recording.
+- **Enable Recorded Movement** — keep keyframes on disk but disable playback on a per-block basis.
+
+---
+
+## Block Playback Modes (Natural / Loop / Stretch / Speed)
+
+Every block carries a **playback mode** that controls how its sample plays
+across the region.  Set it in the Block Info panel's `Mode` combo (or via
+the dedicated `Loop sound` toggle for the Loop mode).
+
+| Mode | Behaviour |
+|------|-----------|
+| **Natural** | Sample plays once at its natural rate and stops at sample end. |
+| **Loop** | Sample wraps inside the audio thread for the full region duration (gapless by default).  Use `Loop length (s)` to stop the loop early (movement still plays through the full region).  Use `Loop gap (s)` to insert silence between repeats. |
+| **Stretch** | Sample's playback rate is scaled so it spans the region; pitch follows. |
+| **Speed** | Like Stretch but only speeds up (rate ≥ 1.0); useful when the sample is longer than the region. |
+
+The `Loop = Block Dur.` button next to the `Loop length` editor one-clicks
+the current block duration into the field — handy for "loop fills the
+region" intent.
+
+---
+
+## Mute, Hide, and Type Filters
+
+Three layered controls for keeping the scene focused.
+
+### Per-block toggles (Block Info)
+
+* **Mute (no audio, forever)** — silence this block.  Movement still plays.
+  Useful for keeping a part recorded but out of the mix.
+* **Hide block in viewport** — renderer skip (mesh and highlights).  Block
+  still ticks the sequencer and emits audio.
+* **Mute from / to (s)** — time-window mute.  While the playhead is inside
+  `[from, to)`, the audio cuts and resumes automatically as the playhead
+  enters / leaves the window.  Set both to 0 to disable.
+
+### Toolbar `Mute ▾` and `View ▾`
+
+Per-type filters.  Each menu lists every block type grouped by category
+(Synth / Strings / Woodwinds / Brass / Percussion / Special) with check
+marks for currently muted / hidden types.  Use "Show All Types" or
+"Mute All Types" for bulk toggles.  Both filters are **transient** —
+they're not persisted to `.sime` and are intentionally ignored by the
+audio exporter (exports only honour per-block `Mute (no audio, forever)`).
+
+### Combined precedence
+
+Indefinite mute (per-block forever + per-type) wins over the time window.
+A muted block still ticks its movement state machine, so animation keeps
+going regardless of mute combination.
+
+---
+
+## Audio Analysis (frequency & oscilloscope)
+
+Selecting a block runs an offline analysis on its loaded sample and shows
+the result in the Info panel:
+
+* **Pitch line** — estimated fundamental frequency, nearest note name,
+  duration, and period.  Estimation is autocorrelation-based over a
+  musically reasonable lag window (≈ 60–1500 Hz).  When the sample is
+  noise-like or too short to estimate reliably, the line marks the pitch
+  as "(uncertain)" so percussion doesn't pretend to have a tuned pitch.
+* **Oscilloscope graph** — filled blue min/max envelope (128 columns).
+  Quick visual for attack / decay shape.
+
+Analysis is cached per selection; opening a different block re-analyzes.
+
+---
+
+## Doppler Effect
+
+The audio engine carries a Doppler model that pitch-shifts moving voices
+based on their velocity relative to the listener (the camera).
+
+* Toggle: `Doppler` pill in the toolbar.  **Off by default** in this build
+  while we tune defaults.
+* Source velocity is derived from recorded-movement keyframes by the
+  sequencer (per segment).
+* Listener position is fed each frame from the live camera by the GL
+  thread.
+* Speed of sound is 343 m/s by default (single grid unit ≈ 1 m).
+* The exporter does **not** bake Doppler into rendered files by default
+  (matches the live default-off behaviour).  Flip it on in
+  `SceneAudioExporter::dispatchEvents` if you ever want a Doppler-baked
+  bounce.
 
 ---
 
@@ -290,28 +476,30 @@ Scenes are saved as `.sime` binary files — a compact, custom format that store
 ### What Gets Saved
 
 Each block record includes:
-- Serial number and block type (Violin, Piano, Drum, Custom, Listener)
-- 3D grid position (x, y, z)
-- Sound ID and custom WAV file path (if applicable)
-- Start time and duration
-- Duration lock flag
-- Recorded movement path (all keyframes with time and position)
+- Serial number and block type (one of the 23 instrument types)
+- 3D grid position (x, y, z) + color
+- Sound ID, custom WAV file path
+- Start time, duration, duration-lock flag, copied-region list (`timesList`)
+- Recorded movement path (keyframes with time and position)
+- Movement controls — `movementEnabled`, `playbackMode` (Natural / Loop / Stretch / Speed), `movementDurationSec`, `movementYOffset`
+- Loop controls — `isLooping`, `loopDurationSec`, `loopBufferSec`
+- Per-block flags — `isMuted`, `isHidden`
+- Mute-window — `muteStartSec`, `muteEndSec`
 
 ### File Format
 
-The `.sime` format uses a 12-byte header (`SIME` magic, version, block count) followed by tightly packed block records. Movement keyframes are stored inline — no padding, no JSON overhead. A scene with 100 blocks and no movement data is roughly 5 KB.
+The `.sime` format uses a 12-byte header (`SIME` magic, version, block count) followed by tightly packed block records.  The current version is **v8**.  Older files (v5 / v6 / v7) still load — additive trailing fields fall back to sensible defaults.  Anything written by the current build is **not** readable by older binaries.
 
-### Auto-Save / Auto-Load
+### Auto-Save
 
-When the app closes, it saves the current scene to `%APPDATA%/SIME/autosave.sime`. On the next launch, that file is automatically loaded so you pick up where you left off. The auto-save does not overwrite any manually saved `.sime` file.
+When the app closes, it saves the current scene to `%APPDATA%/SIME/autosave.sime`.  The previous "silent auto-load on startup" behaviour was removed — **New Scene now always starts empty**, and `File → Open Scene…` is the explicit way to restore a saved scene (including the auto-save).
 
 ### Workflow
 
 1. Build a scene with blocks.
-2. Open the **File** menu (top-right of the toolbar row), then choose **Save** or **Save As** and pick a location and name.
-3. Close and reopen the app — your scene is restored from the auto-save.
-4. From **File → Open Scene…** load a different `.sime` file at any time.
-5. From **File → New Scene** start a blank scene.
+2. Open the **File ▾** menu, then choose **Save** or **Save As** and pick a location and name.
+3. **File → Open Scene…** to load a different `.sime` file at any time, or open `%APPDATA%/SIME/autosave.sime` if you want the auto-save back.
+4. **File → New Scene** to start a blank scene.
 
 ---
 
@@ -356,7 +544,13 @@ Speaker output
 
 **`AudioEngine`** — receives events via a `juce::AbstractFifo`-backed queue. Maintains a flat list of `ActiveVoice` instances, each with a sample read cursor, gain, pitch rate, and stereo pan. Runs mixing in the audio callback — no allocations, no locks.
 
-**`BlockEntry`** — the shared data structure. Carries position, block type, sound ID, start/duration timing, playback state flags, and an optional recorded movement path (`std::vector<MovementKeyFrame>`).
+**`BlockEntry`** — the shared data structure. Carries position, block type, sound ID, start/duration timing, playback state flags, recorded movement path (`std::vector<MovementKeyFrame>`), playback mode (`Natural / Loop / Stretch / Speed`), movement duration / Y-lift / enabled flag, loop length / loop gap, per-block mute / hide flags, mute-window endpoints, and transient runtime flags (`effectiveMuted`, `wasMutedLastTick`, `sampleNaturalDurationSec`).
+
+**`AudioAnalysis`** — offline pitch (autocorrelation F0) + waveform-envelope helper called by the sidebar when a block is selected.
+
+**`SceneAudioExporter`** — deterministic offline mixer that mirrors the live audio path.  Stepwise simulation of the real `TransportClock` + `SequencerEngine`, with a private `MixerVoice` per-voice carrier that copies `ActiveVoice`'s loop-gap, Doppler, gain, and pan logic.
+
+**Doppler:** `AudioEngine` carries listener position + speed-of-sound atomics; the GL render thread feeds the camera each frame; per-voice rate is `pitchRate × blockRate × dopplerRate × transport playbackRate`.
 
 ### Threading Model
 
@@ -398,18 +592,19 @@ SIME/
     ├── Raycaster.cpp/h            # DDA voxel raycasting
     ├── VoxelGrid.h                # Sparse voxel data structure
     ├── MathUtils.h                # Vec3i, Vec3f, Mat4
-    ├── BlockEntry.h               # Shared block data struct
+    ├── BlockEntry.h               # Shared block data struct (incl. mute, hide, loop gap, mute window)
     ├── BlockType.h                # Block type enum + helpers
-    ├── SequencerEvent.h           # Event value type (Start/Stop/Movement)
-    ├── AudioEngine.cpp/h          # JUCE audio playback engine
-    ├── SequencerEngine.cpp/h      # Block → audio event sequencer
-    ├── TransportClock.cpp/h       # Playback clock
-    ├── SidebarComponent.cpp/h     # Left-side block list panel
-    ├── TransportBarComponent.cpp/h # Bottom play/pause/stop bar
-    ├── BlockEditPopup.cpp/h       # Floating block edit dialog (embeds picker)
+    ├── SequencerEvent.h           # Event value type (Start/Stop/Movement) — carries velocity for Doppler
+    ├── AudioEngine.cpp/h          # JUCE audio engine — atomic pause/stop, listener pos, Doppler, loop gap
+    ├── AudioAnalysis.cpp/h        # Offline F0 estimate + waveform envelope for the sidebar
+    ├── SequencerEngine.cpp/h      # Block → audio event sequencer (incl. mute transitions + loop length)
+    ├── TransportClock.cpp/h       # Playback clock (with playbackRate)
+    ├── SidebarComponent.cpp/h     # Left-side block info panel — scrollable, embeds analyzer + movement graph
+    ├── TransportBarComponent.cpp/h # Bottom play/pause/stop bar + speed dropdown
+    ├── BlockEditPopup.cpp/h       # Floating block edit dialog (timing + sound only; loop UI lives in Info)
     ├── MovementConfirmPopup.h     # Movement recording confirm dialog
-    ├── SceneFile.cpp/h            # Binary .sime scene save/load
-    ├── SceneAudioExporter.cpp/h   # Offline timeline bounce + format writers
+    ├── SceneFile.cpp/h            # Binary .sime scene save/load (v8 — see SESSION_2026-05-23_REPORT.md)
+    ├── SceneAudioExporter.cpp/h   # Offline timeline bounce + format writers — mirrors live audio engine
     ├── ExportAudioDialog.cpp/h    # Format picker for export
     ├── SoundLibrary.cpp/h         # CSV index + lazy WAV cache (13,759 entries)
     └── SoundPickerComponent.cpp/h # Searchable list UI for the edit popup
@@ -502,6 +697,33 @@ loaded".
 - File format version → `kVersion` constant (bump when adding new fields)
 - Auto-save location → `autoSave()` in `MainComponent.cpp`
 - Block serialization order → `save()` / `load()` in `SceneFile.cpp`
+- Adding a new persisted field: bump `kVersion`, append `writeVal(...)` at the
+  end of the per-block write block, and add a `if (version >= N) readVal(...)`
+  branch in `load()` with a sensible default for older files
+
+### Block Info Panel
+**`SidebarComponent.cpp` / `SidebarComponent.h`**
+- Add a new editor → declare the control, `addAndMakeVisible` it, set bounds in `resized()`, paint its label in `paint()`, hydrate it in `showBlockInfo`, clear it in `clearSelectedBlock`, plumb it through `onApplyBlockInfo` (widen the std::function signature), and forward to `view.applySidebarBlockInfo` from `MainComponent`
+- Scrolling math → `infoScrollY_`, `infoContentBottomY_`, `mouseWheelMove`
+
+### Toolbar Menus
+**`MainComponent.cpp` / `MainComponent.h`**
+- `File ▾` → `showFileMenu()` / `handleFileMenu()`
+- `View ▾` (per-type visibility) → `showViewMenu()`
+- `Mute ▾` (per-type indefinite mute) → `showMuteMenu()`
+- Add another `Xxx ▾` filter menu: declare a `TextButton`, follow the existing patterns; add a `std::array<std::atomic<bool>, kNumBlockTypes>` to `ViewPortComponent` with `setBlockTypeXxx` / `isBlockTypeXxx` accessors
+
+### Doppler & Listener
+**`AudioEngine.cpp` / `AudioEngine.h`**
+- Listener position → `setListenerPosition(x, y, z)` (called from `ViewPortComponent::renderOpenGL` each frame)
+- Speed of sound → `setSpeedOfSound(c)`
+- Doppler enable → `setDopplerEnabled(bool)` (the toolbar pill flips this)
+
+### Playback Speed
+**`TransportClock.cpp` / `TransportClock.h`**
+- `playbackRate` member; `update(dt)` multiplies by it before advancing
+**`TransportBarComponent.cpp`**
+- Speed dropdown options live in the `juce::PopupMenu` built in `showSpeedMenu()`
 
 ---
 
@@ -513,16 +735,35 @@ All red-line errors in `AudioEngine.cpp` cascade from one root cause: Cursor's c
 
 To fix the editor cosmetics only, add `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to the CMake configure step and point a `.clangd` file at the result.
 
-### Thread Safety
+### Fixed in the 2026-05-23 session
+
+* `T1` — Block / sidebar edits are now queued through the GL thread via
+  `pendingBlockEdit_` / `pendingSidebarEdit_` (mutex-guarded), drained in
+  `ViewPortComponent::renderOpenGL`.
+* HUD overlay rendering bug (washed-off right half of the controls pill) —
+  fixed by a full GL state reset at the end of `renderOpenGL`.
+* "Block 251" after New Scene — `nextSerial` resets to 1 in `clearScene()`.
+* New Scene loading the previous scene — silent auto-load removed from
+  `Main.cpp`.
+* Block Info persisting after deletion / scene change — `clearSelectedBlock`
+  + `clearSelectedBlockIfSerial` plumbed through the deletion paths.
+* Hover / select interaction — green hover highlight + LMB-on-block selection
+  now work in normal mode.
+* Loop toggle "turns off inconsistently" — Loop UI consolidated in the
+  sidebar Info panel; the popup no longer carries its own toggle.
+
+See [`md files/SESSION_2026-05-23_REPORT.md`](md%20files/SESSION_2026-05-23_REPORT.md)
+for the full bug log + root causes.
+
+### Thread Safety (still open)
 
 | ID | Severity | Summary |
 |----|----------|---------|
-| T1 | High | `applyBlockEdit()` writes GL-thread-owned `blockList` from the message thread — unguarded data race |
-| T2 | Medium | `getTransportDuration()` iterates `blockList` from the 30Hz timer on the message thread |
+| T2 | Medium | `getTransportDuration()` iterates `blockList` from the 30 Hz timer on the message thread |
 | T3 | Low–Med | Transport play/pause/stop called cross-thread on a non-thread-safe `TransportClock` |
 | T4 | Low | `hasHit` / `currentHit` read in `keyPressed()` without a lock |
 
-### Audio
+### Audio (still open)
 
 | ID | Severity | Summary |
 |----|----------|---------|
@@ -530,23 +771,35 @@ To fix the editor cosmetics only, add `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to th
 | A2 | Low | `activeVoices_.push_back()` can allocate on the audio thread if >32 simultaneous voices |
 | A3 | Low | Brief voice overlap (one audio block) on rapid transport stop/start |
 
-### Sequencer
+### Sequencer (still open)
 
 | ID | Severity | Summary |
 |----|----------|---------|
-| S1 | Medium | All newly placed blocks default to `startTimeSec = 0.0` — everything fires at once until manually staggered |
+| S1 | Medium | Newly placed blocks default to `startTimeSec = 0.0` — everything fires at once until manually staggered |
 | S2 | Low | Pitch only goes up (Y ≥ 0); no way to pitch below normal |
 
-### UI
+### UI (still open)
 
 | ID | Severity | Summary |
 |----|----------|---------|
-| U1 | Low | Two debug alert dialogs appear on every startup (leftover from development) |
+| U1 | Low | Two debug alert dialogs may still appear on first run if the sound library isn't found |
+| U2 | Low | Doppler default is off and the model needs more tuning (toggle in the toolbar to experiment) |
 
 ### Recommended Fix Order
 
-1. Remove debug startup alerts (U1) — trivial
-2. Thread-safe block edits (T1, T2) — highest crash risk; queue edits through the GL thread like placements already do
-3. Auto-stagger block start times (S1) — or at minimum, increment based on existing block end times
-4. Regenerate synth tones at the device's actual sample rate (A1)
+1. Auto-stagger block start times (S1) — or at minimum, increment based on existing block end times
+2. Replace `activeVoices_.push_back` with a fixed-capacity pool (A2)
+3. Regenerate synth tones at the device's actual sample rate (A1)
+4. Thread-safe transport (T3) — wrap `TransportClock` mutators in atomics or fold them into the existing pending-edit queue
+5. Tune Doppler defaults (U2) — possibly expose speed-of-sound + global gain in the toolbar
+
+### Pending feature queue (not bugs)
+
+* **Click-and-drag multi-select** for bulk mute / hide
+* **User-adjustable per-block frequency** (the analyzer is currently read-only)
+* **Multiple sounds at different times** on the same block
+* **Position keyframes** as an alternative to recorded movement
+* **Block-type change mid-movement** (e.g. violin → piano halfway)
+* **MP3 / AAC export** — extend `SceneAudioExporter::Format` (see the
+  "How to extend" section of [`SESSION_2026-05-23_REPORT.md`](md%20files/SESSION_2026-05-23_REPORT.md))
 

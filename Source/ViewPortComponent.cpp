@@ -71,6 +71,13 @@ static bool isInBounds(const Vec3i& pos)
 
 ViewPortComponent::ViewPortComponent()
 {
+    // Start every block type visible — the View menu toggles entries.
+    for (auto& f : blockTypeVisible_)
+        f.store(true);
+    // Start every block type audible — the Mute menu toggles entries.
+    for (auto& f : blockTypeMuted_)
+        f.store(false);
+
     setWantsKeyboardFocus(true);
     openGLContext.setOpenGLVersionRequired(juce::OpenGLContext::openGL3_2);
     openGLContext.setRenderer(this);
@@ -331,6 +338,8 @@ void ViewPortComponent::renderOpenGL()
             {
                 if (b.serial == edit.serial)
                 {
+                    const int prevSoundId = b.soundId;
+
                     b.startTimeSec = edit.startTime;
                     if (!b.durationLocked)
                         b.durationSec = edit.duration;
@@ -345,6 +354,47 @@ void ViewPortComponent::renderOpenGL()
                     }
                     b.isLooping       = edit.isLooping;
                     b.loopDurationSec = edit.loopDurationSec;
+
+                    // ── Auto-adjust block duration to the sound's natural length.
+                    //   * If the user has already locked the duration (typically
+                    //     via a recorded-movement confirm), respect that.
+                    //   * If the block has movement and movementDurationSec is
+                    //     still default (0 = "use durationSec"), pin movement to
+                    //     the *current* duration before we expand the region so
+                    //     the path keeps its original length.
+                    //   * Use max(sample length, movement length) so movement
+                    //     always plays out fully and audio plays its full length.
+                    if (b.soundId >= 0 && b.soundId != prevSoundId
+                        && !b.durationLocked)
+                    {
+                        const auto& lib = audioEngine.getSampleLibrary();
+                        auto itLib = lib.find(b.soundId);
+                        if (itLib != lib.end() && itLib->second.getNumSamples() > 0)
+                        {
+                            const double sampleRate = audioEngine.getOutputSampleRate();
+                            const double natDur = (sampleRate > 0.0)
+                                ? itLib->second.getNumSamples() / sampleRate
+                                : 0.0;
+
+                            if (natDur > 0.001)
+                            {
+                                const bool hasMov = b.hasRecordedMovement
+                                                 && b.movementEnabled
+                                                 && b.recordedMovement.size() >= 2;
+                                const double movDur = hasMov ? b.effectiveMovementDuration() : 0.0;
+
+                                if (hasMov && b.movementDurationSec <= 0.001)
+                                {
+                                    // Freeze movement at its previous span so it
+                                    // doesn't stretch when the region grows.
+                                    b.movementDurationSec = movDur;
+                                }
+
+                                b.durationSec = std::max(natDur, movDur);
+                            }
+                        }
+                    }
+
                     b.resetPlaybackState();
                     break;
                 }
@@ -395,11 +445,86 @@ void ViewPortComponent::renderOpenGL()
                     }
                     b.startTimeSec = se.start;
                     b.durationSec  = se.duration;
-                    if (!se.movementEnabled)
-                        b.hasRecordedMovement = false;
-                    else if (!b.recordedMovement.empty())
+                    // movementEnabled controls playback; keep keyframes either way.
+                    b.movementEnabled = se.movementEnabled;
+                    if (!b.recordedMovement.empty())
                         b.hasRecordedMovement = true;
+
+                    // Phase 1 movement controls
+                    b.playbackMode        = static_cast<BlockPlaybackMode>(se.playbackMode);
+                    b.movementDurationSec = std::max(0.0, se.movementDurationSec);
+                    b.movementYOffset     = se.movementYOffset;
+
+                    // ── v7/v8 per-block flags ─────────────────────────────
+                    const bool   wasMuted          = b.isMuted;
+                    const double prevLoopBufferSec = b.loopBufferSec;
+                    const double prevLoopDurSec    = b.loopDurationSec;
+                    const bool   prevIsLooping     = b.isLooping
+                                                  || b.playbackMode == BlockPlaybackMode::Loop;
+
+                    b.isMuted        = se.isMuted;
+                    b.isHidden       = se.isHidden;
+                    b.loopBufferSec  = std::max(0.0, se.loopBufferSec);
+                    b.loopDurationSec= std::max(0.0, se.loopDurationSec);
+                    b.muteStartSec   = std::max(0.0, se.muteStartSec);
+                    b.muteEndSec     = std::max(0.0, se.muteEndSec);
+
+                    // Loop toggle is the source of truth — keep playbackMode
+                    // and the legacy isLooping flag in sync with it so the
+                    // sidebar's Loop toggle never desyncs from the combo.
+                    if (se.isLooping)
+                    {
+                        b.playbackMode = BlockPlaybackMode::Loop;
+                        b.isLooping    = true;
+                    }
+                    else
+                    {
+                        if (b.playbackMode == BlockPlaybackMode::Loop)
+                            b.playbackMode = BlockPlaybackMode::Natural;
+                        b.isLooping = false;
+                    }
+
+                    const bool nowIsLooping = b.isLooping
+                                           || b.playbackMode == BlockPlaybackMode::Loop;
+
+                    // If the user just muted a playing block, cut its voice
+                    // immediately so they hear the change in real time.
+                    if (!wasMuted && b.isMuted)
+                    {
+                        SequencerEvent stopEv;
+                        stopEv.type        = SequencerEventType::Stop;
+                        stopEv.blockSerial = b.serial;
+                        audioEngine.processEvents({ stopEv });
+                    }
+
+                    // Any change to loop semantics needs to retrigger the
+                    // voice so the new loop gap / duration / on-off state
+                    // actually takes effect on the playing block (voice
+                    // params are baked at Start time).
+                    const bool loopParamsChanged =
+                          nowIsLooping        != prevIsLooping
+                       || std::abs(b.loopBufferSec - prevLoopBufferSec) > 1e-4
+                       || std::abs(b.loopDurationSec - prevLoopDurSec)   > 1e-4;
+
+                    if (loopParamsChanged)
+                    {
+                        // Kill the live voice; resetPlaybackState() (below)
+                        // will let the next sequencer tick fire Start again
+                        // with the new params.
+                        SequencerEvent stopEv;
+                        stopEv.type        = SequencerEventType::Stop;
+                        stopEv.blockSerial = b.serial;
+                        audioEngine.processEvents({ stopEv });
+                    }
+
                     b.resetPlaybackState();
+
+                    const int editedSerial = se.serial;
+                    juce::MessageManager::callAsync([this, editedSerial]()
+                    {
+                        if (onBlockPropertiesChanged)
+                            onBlockPropertiesChanged(editedSerial);
+                    });
                     break;
                 }
             }
@@ -453,9 +578,17 @@ void ViewPortComponent::renderOpenGL()
                     b.durationSec         = mo.duration;
                     b.durationLocked      = true;
                     b.hasRecordedMovement = true;
+                    b.movementEnabled     = true;
                     b.isRecordingMovement = false;
                     DBG("Movement confirm applied on GL thread: block " << mo.serial
                         << "  keyframes=" << (int)b.recordedMovement.size());
+
+                    const int confirmedSerial = mo.serial;
+                    juce::MessageManager::callAsync([this, confirmedSerial]()
+                    {
+                        if (onBlockPropertiesChanged)
+                            onBlockPropertiesChanged(confirmedSerial);
+                    });
                     break;
                 }
             }
@@ -885,6 +1018,23 @@ void ViewPortComponent::renderOpenGL()
 
     // ── Sequencer + audio ────────────────────────────────────────────────
     {
+        // Refresh sample length cache per block so Stretch / Speed modes
+        // can compute the right playback rate.  Cheap: small hash lookup.
+        const auto& lib = audioEngine.getSampleLibrary();
+        const double sr = audioEngine.getOutputSampleRate();
+        for (auto& b : blockList)
+        {
+            auto it = lib.find(b.soundId);
+            b.sampleNaturalDurationSec = (it != lib.end() && sr > 0.0)
+                ? (it->second.getNumSamples() / sr)
+                : 0.0;
+
+            // Compose per-block indefinite mute = block's own isMuted OR the
+            // toolbar's per-type mute.  Time-window mute is handled inside
+            // the sequencer because it depends on the current transport time.
+            b.effectiveMuted = b.isMuted || isBlockTypeMuted(b.blockType);
+        }
+
         const auto events = sequencer.update(transportClock, blockList);
         
         // Process movement events and update voxel grid
@@ -930,7 +1080,8 @@ void ViewPortComponent::renderOpenGL()
             // Reset positions to initial keyframe
             for (auto& b : blockList)
             {
-                if (b.hasRecordedMovement && !b.recordedMovement.empty())
+                if (b.hasRecordedMovement && b.movementEnabled
+                    && !b.recordedMovement.empty())
                 {
                     voxelGrid.remove(b.pos);
                     b.pos = b.recordedMovement[0].position;
@@ -1015,12 +1166,28 @@ void ViewPortComponent::renderOpenGL()
     const Mat4  vp     = proj * view;
     Vec3f lightDir     = Vec3f(0.55f, 1.f, 0.4f).normalized();
 
-    renderer.renderGrid(vp);
+    // Feed the listener position to the audio engine each frame so the
+    // Doppler effect tracks camera movement.  Cheap atomic stores.
+    {
+        const Vec3f camPos = camera.getPosition();
+        audioEngine.setListenerPosition(camPos.x, camPos.y, camPos.z);
+    }
+
+    if (showFloorPlane_.load())  renderer.renderPlaneXZ(vp);
+    if (showWallXPlane_.load())  renderer.renderPlaneYZ(vp);
+    if (showWallZPlane_.load())  renderer.renderPlaneXY(vp);
     renderer.renderOriginMarker(vp, lightDir);
 
-    // Per-block colored rendering
+    // Per-block colored rendering.  Hidden blocks are excluded so the
+    // composer can hide / isolate categories of blocks while still keeping
+    // them in the scene (and the sequencer).
+    auto isBlockShownLocal = [this](const BlockEntry& b) {
+        return !b.isHidden && isBlockTypeVisible(b.blockType);
+    };
+
     for (const auto& b : blockList)
-        renderer.renderSolidBlock(vp, lightDir, b.pos, b.colour);
+        if (isBlockShownLocal(b))
+            renderer.renderSolidBlock(vp, lightDir, b.pos, b.colour);
     
 
     // ── Highlights ────────────────────────────────────────────────────────────
@@ -1066,6 +1233,7 @@ void ViewPortComponent::renderOpenGL()
             // Green: block under cursor (hover to select)
             for (const auto& b : blockList)
             {
+                if (!isBlockShownLocal(b)) continue;
                 if (b.serial == hoveredBlockSerial_)
                 {
                     renderer.renderHighlight(vp, b.pos, Vec3f{ 0.2f, 1.f, 0.3f });
@@ -1079,6 +1247,7 @@ void ViewPortComponent::renderOpenGL()
         {
             for (const auto& b : blockList)
             {
+                if (!isBlockShownLocal(b)) continue;
                 if (b.serial == highlightedBlockSerial_)
                 {
                     const Vec3f selCol = hoveringBlock && b.serial == hoveredBlockSerial_
@@ -1093,6 +1262,7 @@ void ViewPortComponent::renderOpenGL()
         // Brighter green while a block is actively playing
         for (const auto& b : blockList)
         {
+            if (!isBlockShownLocal(b)) continue;
             if (b.isPlaying)
                 renderer.renderHighlight(vp, b.pos, Vec3f{ 0.f, 1.f, 0.3f });
         }
@@ -1103,7 +1273,7 @@ void ViewPortComponent::renderOpenGL()
     if (editMode && selectedSerial >= 0)
     {
         for (const auto& b : blockList)
-            if (b.serial == selectedSerial)
+            if (isBlockShownLocal(b) && b.serial == selectedSerial)
                 renderer.renderHighlight(vp, b.pos, Vec3f{ 1.f, 0.5f, 0.1f });
     }
 
@@ -1111,8 +1281,131 @@ void ViewPortComponent::renderOpenGL()
     if (editMode)
     {
         for (const auto& b : blockList)
-            if (b.serial != selectedSerial)
+            if (isBlockShownLocal(b) && b.serial != selectedSerial)
                 renderer.renderHighlight(vp, b.pos, Vec3f{ 0.6f, 0.5f, 0.1f });
+    }
+
+    // ── 3D move arrows on selected block (Blender-style gizmo) ─────────────────
+    // Drawn last and with depth-test disabled so they're never hidden by the
+    // block or terrain — matches user expectation for a manipulator.
+    {
+        Vec3f gOrigin;
+        int   gSerial = -1;
+        const bool show = showArrows_.load()
+                       && getSelectedGizmoOrigin(gOrigin, gSerial);
+        if (show)
+        {
+            // Re-pick under the current cursor so the hover highlight updates
+            // every frame while idle.
+            float mx, my;
+            { juce::ScopedLock lock(mouseMutex); mx = mouse.curX; my = mouse.curY; }
+            const int activeAxis = gizmoActiveAxis_.load();
+            const int hoverAxis  = (activeAxis >= 0) ? activeAxis
+                                                     : pickGizmoAxis(mx, my);
+            gizmoHoveredAxis_.store(hoverAxis);
+
+            const Vec3f red   { 0.95f, 0.20f, 0.20f };
+            const Vec3f green { 0.20f, 0.95f, 0.20f };
+            const Vec3f blue  { 0.20f, 0.45f, 0.95f };
+            const Vec3f cols[3] { red, green, blue };
+
+            glDisable(GL_DEPTH_TEST);
+            for (int a = 0; a < 3; ++a)
+            {
+                const bool hl = (hoverAxis == a) || (activeAxis == a);
+                renderer.renderArrow(vp, gOrigin, a, 1.0f, cols[a], hl);
+            }
+            glEnable(GL_DEPTH_TEST);
+        }
+        else
+        {
+            gizmoHoveredAxis_.store(-1);
+        }
+    }
+
+    // ── Gizmo drag queue (message → GL thread) ────────────────────────────────
+    {
+        GizmoDragRequest req;
+        {
+            juce::ScopedLock lock(gizmoMutex_);
+            req = pendingGizmoDrag_;
+            pendingGizmoDrag_.type = GizmoDragRequest::None;
+        }
+
+        if (req.type == GizmoDragRequest::Start && req.axis >= 0)
+        {
+            // Confirm a selected block still exists; find it and snapshot pos.
+            for (auto& b : blockList)
+            {
+                if (b.serial == highlightedBlockSerial_)
+                {
+                    gizmoActiveAxis_.store(req.axis);
+                    gizmoDragSerial_   = b.serial;
+                    gizmoDragOrigPos_  = b.pos;
+
+                    const Vec3f origin{ (float) b.pos.x + 0.5f,
+                                        (float) b.pos.y + 0.5f,
+                                        (float) b.pos.z + 0.5f };
+                    gizmoDragStartCoord_ =
+                        projectRayOntoAxis(req.x, req.y, origin, req.axis);
+                    break;
+                }
+            }
+        }
+        else if (req.type == GizmoDragRequest::Move && gizmoActiveAxis_.load() >= 0)
+        {
+            const int activeAxis = gizmoActiveAxis_.load();
+            for (auto& b : blockList)
+            {
+                if (b.serial == gizmoDragSerial_)
+                {
+                    const Vec3f origin{ (float) gizmoDragOrigPos_.x + 0.5f,
+                                        (float) gizmoDragOrigPos_.y + 0.5f,
+                                        (float) gizmoDragOrigPos_.z + 0.5f };
+                    const float now = projectRayOntoAxis(req.x, req.y,
+                                                         origin, activeAxis);
+                    const int delta = (int) std::lround(now - gizmoDragStartCoord_);
+
+                    Vec3i target = gizmoDragOrigPos_;
+                    if (activeAxis == 0) target.x += delta;
+                    if (activeAxis == 1) target.y += delta;
+                    if (activeAxis == 2) target.z += delta;
+
+                    if (target == b.pos) break;             // no change
+                    if (target.y < 0)    break;             // never sink below floor
+                    if (!isInBounds(target)) break;
+
+                    // Reject if another block occupies the cell.
+                    bool occupied = false;
+                    for (const auto& other : blockList)
+                        if (other.serial != b.serial && other.pos == target)
+                            { occupied = true; break; }
+                    if (occupied) break;
+
+                    voxelGrid.remove(b.pos);
+                    b.pos = target;
+                    voxelGrid.add(target);
+                    renderer.meshDirty = true;
+
+                    // Push to sidebar / timeline immediately so the Pos field updates.
+                    pushBlockListToUi();
+                    if (onBlockPropertiesChanged)
+                    {
+                        const int s = b.serial;
+                        juce::MessageManager::callAsync([this, s]()
+                        {
+                            if (onBlockPropertiesChanged) onBlockPropertiesChanged(s);
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+        else if (req.type == GizmoDragRequest::End)
+        {
+            gizmoActiveAxis_.store(-1);
+            gizmoDragSerial_ = -1;
+        }
     }
 
     if (editMode && recordKeyHeld && recordingBlockSerial >= 0)
@@ -1543,7 +1836,8 @@ void ViewPortComponent::paint(juce::Graphics& g)
 
         juce::String hint;
         if (isRec)
-            hint = "Release Mouse" + dot + "Finish Recording";
+            hint = "Release Mouse" + dot + "Finish Recording"
+                 + "    Shift+Scroll" + dot + "Change Y (height)";
         else if (isShift)
             hint = "Scroll" + dot + "Raise / Lower Plane"
                  + "    LMB" + dot + "Place"
@@ -1702,6 +1996,133 @@ bool ViewPortComponent::isInGizmoArea(float x, float y) const
 void ViewPortComponent::resized() {}
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Gizmo helpers (GL thread)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// We pick using simple world-space ray-vs-segment distance.  The shaft length
+// matches kLength in Renderer::buildArrowMeshes() (1.0 unit), so the segment
+// runs from the cube center to center+axis*1.0.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool ViewPortComponent::getSelectedGizmoOrigin(Vec3f& outOrigin, int& outSerial) const
+{
+    if (highlightedBlockSerial_ < 0) return false;
+    for (const auto& b : blockList)
+    {
+        if (b.serial == highlightedBlockSerial_)
+        {
+            outOrigin = { (float) b.pos.x + 0.5f,
+                          (float) b.pos.y + 0.5f,
+                          (float) b.pos.z + 0.5f };
+            outSerial = b.serial;
+            return true;
+        }
+    }
+    return false;
+}
+
+int ViewPortComponent::pickGizmoAxis(float mx, float my) const
+{
+    Vec3f origin; int serial = -1;
+    if (!getSelectedGizmoOrigin(origin, serial)) return -1;
+
+    const int   w = getWidth(), h = getHeight();
+    if (w <= 0 || h <= 0) return -1;
+
+    const float aspect = (float) w / (float) h;
+    const Mat4 view = camera.getViewMatrix();
+    const Mat4 proj = camera.getProjectionMatrix(aspect);
+    const Vec3f rayDir = Raycaster::screenToRay(mx, my,
+                                                (float) w, (float) h, view, proj);
+    const Vec3f rayOrg = camera.getPosition();
+
+    constexpr float kShaftLen   = 1.0f;
+    constexpr float kHitRadius  = 0.18f;   // generous so the user can grab it
+
+    int   bestAxis = -1;
+    float bestT    = std::numeric_limits<float>::max();
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        Vec3f e{ 0.f, 0.f, 0.f };
+        if (axis == 0) e.x = 1.f;
+        else if (axis == 1) e.y = 1.f;
+        else e.z = 1.f;
+
+        // Closest pair between ray (origin rayOrg, dir rayDir) and segment
+        // (origin, e * kShaftLen).  Standard skew-line solve.
+        const Vec3f w0  = rayOrg - origin;
+        const float a   = rayDir.dot(rayDir);
+        const float bD  = rayDir.dot(e);
+        const float c   = e.dot(e);                // = 1
+        const float dD  = rayDir.dot(w0);
+        const float eD  = e.dot(w0);
+        const float den = a * c - bD * bD;
+        if (den < 1e-8f) continue;                 // parallel
+
+        const float tRay = (bD * eD - c * dD) / den;
+        const float sAx  = (a  * eD - bD * dD) / den;
+        if (tRay <= 0.f) continue;                 // behind camera
+
+        const float sClamped = juce::jlimit(0.f, kShaftLen, sAx);
+
+        const Vec3f pAxis = origin + e * sClamped;
+        const Vec3f pRay  = rayOrg + rayDir * tRay;
+        const float d2    = (pAxis - pRay).lengthSq();
+
+        if (d2 < kHitRadius * kHitRadius && tRay < bestT)
+        {
+            bestT    = tRay;
+            bestAxis = axis;
+        }
+    }
+    return bestAxis;
+}
+
+float ViewPortComponent::projectRayOntoAxis(float mx, float my,
+                                            const Vec3f& axisOrigin,
+                                            int axis) const
+{
+    const int w = getWidth(), h = getHeight();
+    const float aspect = (h > 0) ? (float) w / (float) h : 1.f;
+    const Mat4 view = camera.getViewMatrix();
+    const Mat4 proj = camera.getProjectionMatrix(aspect);
+    const Vec3f rayDir = Raycaster::screenToRay(mx, my,
+                                                (float) w, (float) h, view, proj);
+    const Vec3f rayOrg = camera.getPosition();
+
+    Vec3f e{ 0.f, 0.f, 0.f };
+    if (axis == 0) e.x = 1.f;
+    else if (axis == 1) e.y = 1.f;
+    else e.z = 1.f;
+
+    // Plane that contains the axis line and faces the camera most.
+    // Normal = e × (rayDir × e) — perpendicular to axis, lying in the
+    // axis-ray plane.  If degenerate (axis ≈ ray dir) we fall back to a
+    // plane whose normal is the ray-perpendicular component of "up".
+    Vec3f temp = rayDir.cross(e);
+    Vec3f planeN = e.cross(temp);
+    if (planeN.lengthSq() < 1e-8f)
+    {
+        const Vec3f up = (std::abs(e.y) > 0.9f) ? Vec3f{ 0.f, 0.f, 1.f }
+                                                : Vec3f{ 0.f, 1.f, 0.f };
+        planeN = up - e * up.dot(e);     // strip axis-aligned component
+    }
+    planeN = planeN.normalized();
+
+    const float denom = rayDir.dot(planeN);
+    if (std::abs(denom) < 1e-6f)
+        return 0.f;                        // ray parallel to plane
+
+    const float t = (axisOrigin - rayOrg).dot(planeN) / denom;
+    const Vec3f hit = rayOrg + rayDir * t;
+    const Vec3f rel = hit - axisOrigin;
+    if (axis == 0) return rel.x;
+    if (axis == 1) return rel.y;
+    return rel.z;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Mouse events  (message thread)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1754,6 +2175,21 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
+    // ── LMB on a 3D arrow gizmo: take over the click for axis-drag ───────────
+    // Checked before the placement / edit branches so an arrow grab never
+    // accidentally places a block or runs the edit raycast.
+    if (e.mods.isLeftButtonDown() && !e.mods.isShiftDown() && !e.mods.isAltDown())
+    {
+        const int axis = gizmoHoveredAxis_.load();
+        if (axis >= 0 && showArrows_.load())
+        {
+            juce::ScopedLock lock(gizmoMutex_);
+            pendingGizmoDrag_ = { GizmoDragRequest::Start,
+                                  e.position.x, e.position.y, axis };
+            return;   // suppress placement / selection for this click
+        }
+    }
+
     // ── LMB ──────────────────────────────────────────────────────────────────
     if (e.mods.isLeftButtonDown())
     {
@@ -1794,6 +2230,15 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
 
 void ViewPortComponent::mouseUp(const juce::MouseEvent& e)
 {
+    // ── End an active gizmo drag ──────────────────────────────────────────────
+    if (gizmoActiveAxis_.load() >= 0)
+    {
+        juce::ScopedLock lock(gizmoMutex_);
+        pendingGizmoDrag_ = { GizmoDragRequest::End, e.position.x, e.position.y, -1 };
+        repaint();
+        return;
+    }
+
     // ── Stop recording if Alt+drag was happening ──────────────────────────────
     // recordKeyHeld is set by mouseDown (message thread) so it is always visible
     // here, even on a fast click before the GL thread processed the start.
@@ -1889,6 +2334,21 @@ void ViewPortComponent::mouseUp(const juce::MouseEvent& e)
 
 void ViewPortComponent::mouseDrag(const juce::MouseEvent& e)
 {
+    // ── Active gizmo drag — feed the GL thread with the latest cursor ─────────
+    {
+        const int activeAxis = gizmoActiveAxis_.load();
+        if (activeAxis >= 0)
+        {
+            juce::ScopedLock lock(gizmoMutex_);
+            pendingGizmoDrag_ = { GizmoDragRequest::Move,
+                                  e.position.x, e.position.y, activeAxis };
+            // Keep mouse position fresh so the hover highlight stays on the arrow.
+            { juce::ScopedLock m(mouseMutex); mouse.curX = e.position.x; mouse.curY = e.position.y; }
+            repaint();
+            return;
+        }
+    }
+
 //   ── Recording mode: Alt+drag to move block ───────────────────────────────
     if (editMode && e.mods.isAltDown() && recordKeyHeld && selectedSerial >= 0)
     {
@@ -2123,13 +2583,74 @@ void ViewPortComponent::applySidebarBlockInfo(
     Vec3i pos,
     double start,
     double duration,
-    bool movementEnabled)
+    bool movementEnabled,
+    uint8_t playbackMode,
+    double movementDurationSec,
+    int movementYOffset,
+    bool isMuted,
+    bool isHidden,
+    double loopBufferSec,
+    bool isLooping,
+    double loopDurationSec,
+    double muteStartSec,
+    double muteEndSec)
 {
     // Queue for the GL thread — safe to call from the message thread.
     // The GL thread drains pendingSidebarEdit_ in renderOpenGL() and does
     // the voxelGrid.move() + blockList mutation there.
     juce::ScopedLock lock(sidebarEditMutex_);
-    pendingSidebarEdit_ = { serial, pos, start, duration, movementEnabled, true };
+    pendingSidebarEdit_ = {
+        serial, pos, start, duration, movementEnabled, true,
+        playbackMode, movementDurationSec, movementYOffset,
+        isMuted, isHidden, loopBufferSec,
+        isLooping, loopDurationSec, muteStartSec, muteEndSec
+    };
+}
+
+void ViewPortComponent::matchBlockDurationToSound(int serial)
+{
+    // Resolve the sample length on the message thread (read-only access to
+    // the sample library; safe before audio is touched).
+    const auto& lib = audioEngine.getSampleLibrary();
+    const double sampleRate = audioEngine.getOutputSampleRate();
+    if (sampleRate <= 0.0)
+        return;
+
+    juce::ScopedLock lock(blockListSnapshotMutex_);
+    for (auto& b : blockListSnapshot_)
+    {
+        if (b.serial != serial) continue;
+        if (b.soundId < 0) return;
+
+        auto itLib = lib.find(b.soundId);
+        if (itLib == lib.end() || itLib->second.getNumSamples() <= 0)
+            return;
+
+        const double natDur = itLib->second.getNumSamples() / sampleRate;
+        if (natDur <= 0.001) return;
+
+        const bool hasMov = b.hasRecordedMovement
+                         && b.movementEnabled
+                         && b.recordedMovement.size() >= 2;
+        const double movDur = hasMov ? b.effectiveMovementDuration() : 0.0;
+
+        // Same logic as the auto-adjust on sound-assign: preserve movement
+        // span and grow the region to the longer of (sound, movement).
+        const double newDur = std::max(natDur, movDur);
+
+        juce::ScopedLock lk(sidebarEditMutex_);
+        pendingSidebarEdit_ = {
+            serial, b.pos, b.startTimeSec, newDur,
+            b.movementEnabled, true,
+            static_cast<uint8_t>(b.playbackMode),
+            (hasMov && b.movementDurationSec <= 0.001) ? movDur : b.movementDurationSec,
+            b.movementYOffset,
+            b.isMuted, b.isHidden, b.loopBufferSec,
+            b.isLooping, b.loopDurationSec, b.muteStartSec, b.muteEndSec
+        };
+        // Sidebar info will refresh on the next frame snapshot.
+        return;
+    }
 }
 
 bool ViewPortComponent::exportSceneAudioToFile(const juce::File& outputFile,
@@ -2151,7 +2672,33 @@ bool ViewPortComponent::exportSceneAudioToFile(const juce::File& outputFile,
 void ViewPortComponent::seekTransportClock(double newTimeSec)
 {
     transportClock.seekTo(newTimeSec);
-} 
+
+    // 1) Reset every block's sequencer state so the next update() can re-fire
+    //    Start events for any block whose time range now covers the new
+    //    transport position.  This also resets currentKeyframeIndex /
+    //    triggeredKeyframes so movement keyframes get re-emitted.
+    SequencerEngine::resetAllBlocks(blockList);
+
+    // 2) Snap each moving block's visual position to where it would be at
+    //    the new scrub time, even while the transport is paused.  Honours
+    //    the user's movementDurationSec and movementYOffset (Phase 1).
+    if (SequencerEngine::snapBlockPositionsToTime(blockList, newTimeSec))
+    {
+        // Voxel grid is keyed by integer positions — keep it consistent with
+        // any block.pos that just moved.  Cheaper to rebuild than to track
+        // individual moves here.
+        voxelGrid.clear();
+        for (const auto& b : blockList)
+            voxelGrid.add(b.pos);
+        renderer.meshDirty = true;
+        pushBlockListToUi();
+    }
+
+    // 3) Kill anything currently ringing out so audio doesn't double-trigger
+    //    or fight the new playhead position.  Voices restart cleanly from the
+    //    next update() tick.
+    audioEngine.killAllVoices();
+}
 
 void ViewPortComponent::addTimeRangeToBlock(int serial, double start, double duration)
 {
@@ -2210,4 +2757,18 @@ bool ViewPortComponent::deleteBlockOrRegion(int serial, int timeIndex)
         return true;
     }
     return false;
+}
+
+AudioAnalysisResult ViewPortComponent::analyzeBlockAudio(const BlockEntry& block) const
+{
+    if (block.soundId < 0)
+        return {};
+
+    const auto& lib = audioEngine.getSampleLibrary();
+    const auto it   = lib.find(block.soundId);
+    if (it == lib.end() || it->second.getNumSamples() <= 0)
+        return {};
+
+    constexpr double kAnalysisRate = 44100.0;
+    return AudioAnalysis::analyze(it->second, kAnalysisRate);
 }
