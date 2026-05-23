@@ -10,18 +10,19 @@ Move a block left or right and the audio pans. Place it higher and the pitch goe
 ## Table of Contents
 
 1. [Building from Source](#building-from-source)
-2. [Running the App](#running-the-app)
-3. [Controls](#controls)
-4. [Workflow](#workflow)
-5. [Block Movement Recording](#block-movement-recording)
-6. [Save / Load Scenes](#save--load-scenes)
-7. [Export Audio](#export-audio)
-8. [Audio Architecture](#audio-architecture)
-9. [Project Structure](#project-structure)
-10. [Where to Change Things](#where-to-change-things)
-11. [Known Bugs & Issues](#known-bugs--issues)
-12. [Audio library (detailed report)](md%20files/AUDIO_LIBRARY_REPORT.md) — Task 3: 23 block types, CSV index, lazy-loaded WAV picker
-13. [Export audio (detailed report)](md%20files/EXPORT_AUDIO_REPORT.md) — Offline bounce, formats, limitations
+2. [Rebuilding After a Pull](#rebuilding-after-a-pull)
+3. [Running the App](#running-the-app)
+4. [Controls](#controls)
+5. [Workflow](#workflow)
+6. [Block Movement Recording](#block-movement-recording)
+7. [Save / Load Scenes](#save--load-scenes)
+8. [Export Audio](#export-audio)
+9. [Audio Architecture](#audio-architecture)
+10. [Project Structure](#project-structure)
+11. [Where to Change Things](#where-to-change-things)
+12. [Known Bugs & Issues](#known-bugs--issues)
+13. [Audio library (detailed report)](md%20files/AUDIO_LIBRARY_REPORT.md) — Task 3: 23 block types, CSV index, lazy-loaded WAV picker
+14. [Export audio (detailed report)](md%20files/EXPORT_AUDIO_REPORT.md) — Offline bounce, formats, limitations
 
 ---
 
@@ -59,6 +60,45 @@ build\SIME_artefacts\Release\SIME.exe
 
 ---
 
+## Rebuilding After a Pull
+
+Every time you pull new code, rebuild before relaunching, otherwise the running `SIME.exe` will still be the old binary.
+
+### Quick rebuild (Release, recommended)
+
+```powershell
+cd c:\sime
+cmake --build build --config Release --parallel 4
+.\build\SIME_artefacts\Release\SIME.exe
+```
+
+### Full reconfigure + rebuild (use after CMakeLists changes or generator mismatch)
+
+```powershell
+cd c:\sime
+cmake -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release --parallel 4
+.\build\SIME_artefacts\Release\SIME.exe
+```
+
+### Debug build
+
+```powershell
+cd c:\sime
+cmake --build build --config Debug --parallel 1
+.\build\SIME_artefacts\Debug\SIME.exe
+```
+
+`--parallel 1` avoids the MSVC `vc143.pdb` (`C1041`) lock you can hit with parallel Debug builds.
+
+### If the change still doesn't show up
+
+1. Confirm the build actually compiled the file (look for the source name in the build output).
+2. Close any running `SIME.exe` window — running processes hold the old binary open and the new build silently lands beside the locked one.
+3. If CMake complains about generator platform (`Does not match the platform used previously`), delete `build\CMakeCache.txt` and `build\CMakeFiles\` and re-run the full reconfigure command above.
+
+---
+
 ## Running the App
 
 From `C:\sime` in a terminal (e.g. Cursor):
@@ -68,13 +108,13 @@ From `C:\sime` in a terminal (e.g. Cursor):
 git clone https://github.com/juce-framework/JUCE.git JUCE
 
 # Configure
-cmake -B build -G "Visual Studio 17 2022"
+cmake -B build -G "Visual Studio 17 2022" -A x64
 
 # Build
-cmake --build build --config Debug --parallel
+cmake --build build --config Release --parallel 4
 
 # Run
-.\build\SIME_artefacts\Debug\SIME.exe
+.\build\SIME_artefacts\Release\SIME.exe
 ```
 
 If `cmake` is not found, add `C:\Program Files\CMake\bin` to PATH and reopen your terminal.

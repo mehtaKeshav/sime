@@ -1175,8 +1175,27 @@ void ViewPortComponent::renderOpenGL()
         juce::ScopedLock lock(blockListSnapshotMutex_);
         blockListSnapshot_ = blockList;
     }
-  
-    
+
+    // ── Reset GL state for JUCE's 2D overlay compositor ──────────────────────
+    // JUCE composites the paint() output as a textured quad on top of this
+    // framebuffer. If we leave GL state dirty (depth test, cull face, scissor,
+    // bound program / VAO / buffers), the overlay quad can be partially culled
+    // or clipped — symptom: right halves of pills/circles/borders missing.
+    // Force a known-good baseline before returning.
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDepthMask(GL_TRUE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1307,7 +1326,7 @@ void ViewPortComponent::paint(juce::Graphics& g)
     //
     //  ┌──────────────────────────────────────────────────┐
     //  │  BLOCKS       │  X  -12   Y   1   Z  39          │
-    //  │    42         │                                   │
+    //  │    42         │                                  │
     //  └──────────────────────────────────────────────────┘
     //
     // Two rows: labels on top (9 pt, muted), values below (14 pt, white).
@@ -1433,13 +1452,15 @@ void ViewPortComponent::paint(juce::Graphics& g)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Hints pill  (bottom-centre)
+    // Hints pill  (bottom-centre)  — text-hugging width, fully opaque fill.
     //
-    // Context-sensitive shortcut reference.  Key names are slightly brighter
-    // than the surrounding muted text via inline colour changes.
+    // Render order inside this block matters:
+    //   1) measure text width with the same font we'll draw it in
+    //   2) fill a solid opaque pill sized exactly to that width + padding
+    //   3) stroke a bright border
+    //   4) draw text inside, with auto-shrink as a safety net for tiny windows
     // ─────────────────────────────────────────────────────────────────────────
     {
-        // Use middle dot (U+00B7) between key and action for a clean look
         const juce::String dot = juce::String::fromUTF8(" \xc2\xb7 ");
 
         juce::String hint;
@@ -1463,20 +1484,39 @@ void ViewPortComponent::paint(juce::Graphics& g)
                  + "    Tab" + dot + "Edit"
                  + "    C" + dot + "Clear";
 
+        // ── 1) Measure ───────────────────────────────────────────────────────
         g.setFont(fHint);
-        const float tw    = g.getCurrentFont().getStringWidthFloat(hint);
-        const float pw    = tw + 28.f;
-        const float ph    = 24.f;
-        const float px    = ((float)getWidth()  - pw) * 0.5f;
-        const float py    = (float)getHeight() - ph - 10.f;
+        const int textW = (int) std::ceil(g.getCurrentFont().getStringWidthFloat(hint));
 
-        drawPill({ px, py, pw, ph }, 6.f);
+        const int kHPad     = 16;
+        const int kVPad     = 6;
+        const int kBottomM  = 12;
+        const int kSideSafe = 12;
 
-        g.setColour(cMuted.brighter(0.25f));
-        g.drawText(hint,
-                   (int)px + 14, (int)py,
-                   (int)tw, (int)ph,
-                   juce::Justification::centredLeft, false);
+        const int idealW = textW + kHPad * 2;
+        const int maxW   = juce::jmax(120, getWidth() - kSideSafe * 2);
+        const int pillW  = juce::jmin(idealW, maxW);
+        const int pillH  = (int) fHint.getHeight() + kVPad * 2;
+        const int pillX  = (getWidth() - pillW) / 2;
+        const int pillY  = getHeight() - pillH - kBottomM;
+
+        juce::Rectangle<int> pill(pillX, pillY, pillW, pillH);
+
+        // ── 2) Solid fill ────────────────────────────────────────────────────
+        // Fully opaque near-black; cannot blend into the floor grid.
+        g.setColour(juce::Colour(0xff05070d));
+        g.fillRoundedRectangle(pill.toFloat(), 6.f);
+
+        // ── 3) Border ────────────────────────────────────────────────────────
+        g.setColour(juce::Colour(0xff3f6fff).withAlpha(0.55f));
+        g.drawRoundedRectangle(pill.toFloat().reduced(0.5f), 6.f, 1.2f);
+
+        // ── 4) Text ──────────────────────────────────────────────────────────
+        g.setColour(juce::Colour(0xffe8ecf5));
+        g.drawFittedText(hint,
+                         pill.reduced(kHPad, 0),
+                         juce::Justification::centred,
+                         1, 0.5f);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
