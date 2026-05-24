@@ -466,8 +466,18 @@ void ViewPortComponent::renderOpenGL()
                     b.isHidden       = se.isHidden;
                     b.loopBufferSec  = std::max(0.0, se.loopBufferSec);
                     b.loopDurationSec= std::max(0.0, se.loopDurationSec);
-                    b.muteStartSec   = std::max(0.0, se.muteStartSec);
-                    b.muteEndSec     = std::max(0.0, se.muteEndSec);
+
+                    // Adopt the scheduled mute windows, sanitising negative
+                    // starts / non-positive durations so the engine never
+                    // sees nonsensical values.
+                    b.muteWindows.clear();
+                    b.muteWindows.reserve(se.muteWindows.size());
+                    for (const auto& w : se.muteWindows)
+                    {
+                        if (w.durationSec > 0.0)
+                            b.muteWindows.push_back(
+                                { std::max(0.0, w.startSec), w.durationSec });
+                    }
 
                     // Loop toggle is the source of truth — keep playbackMode
                     // and the legacy isLooping flag in sync with it so the
@@ -2592,8 +2602,7 @@ void ViewPortComponent::applySidebarBlockInfo(
     double loopBufferSec,
     bool isLooping,
     double loopDurationSec,
-    double muteStartSec,
-    double muteEndSec)
+    std::vector<MuteWindow> muteWindows)
 {
     // Queue for the GL thread — safe to call from the message thread.
     // The GL thread drains pendingSidebarEdit_ in renderOpenGL() and does
@@ -2603,7 +2612,7 @@ void ViewPortComponent::applySidebarBlockInfo(
         serial, pos, start, duration, movementEnabled, true,
         playbackMode, movementDurationSec, movementYOffset,
         isMuted, isHidden, loopBufferSec,
-        isLooping, loopDurationSec, muteStartSec, muteEndSec
+        isLooping, loopDurationSec, std::move(muteWindows)
     };
 }
 
@@ -2646,7 +2655,7 @@ void ViewPortComponent::matchBlockDurationToSound(int serial)
             (hasMov && b.movementDurationSec <= 0.001) ? movDur : b.movementDurationSec,
             b.movementYOffset,
             b.isMuted, b.isHidden, b.loopBufferSec,
-            b.isLooping, b.loopDurationSec, b.muteStartSec, b.muteEndSec
+            b.isLooping, b.loopDurationSec, b.muteWindows
         };
         // Sidebar info will refresh on the next frame snapshot.
         return;

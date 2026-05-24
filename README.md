@@ -31,6 +31,7 @@ Move a block left or right and the audio pans. Place it higher and the pitch goe
 20. [Audio library (detailed report)](md%20files/AUDIO_LIBRARY_REPORT.md) — 23 block types, CSV index, lazy-loaded WAV picker
 21. [Export audio (detailed report)](md%20files/EXPORT_AUDIO_REPORT.md) — Offline bounce, formats, limitations
 22. [Session 2026-05-23 (detailed report)](md%20files/SESSION_2026-05-23_REPORT.md) — Export, movement, gizmos, audio analysis, Doppler, mute / hide / type filters, loop overhaul, persistence v6→v7→v8
+23. [Testing scenarios](md%20files/TESTING_SCENARIOS.md) — Cross-feature user-story playbook (duration ↔ sound, movement, loop, mute schedule) + UX improvement suggestions
 
 ---
 
@@ -259,7 +260,7 @@ the fold.  Apply commits everything atomically.
 | **Timing** | `Start (s)` and `Duration (s)` editors |
 | **Movement** | `Enable Recorded Movement` toggle; `Mode` combo (Natural / Loop / Stretch / Speed); `Movement Duration` editor (0 = use region duration); `Path Y lift` integer offset |
 | **Loop** | `Loop sound` toggle; `Loop length (s)` editor + `Loop = Block Dur.` button (one-click match); `Loop gap (s)` editor (silence between repeats) |
-| **Mute / Hide** | `Mute (no audio, forever)` toggle; `Hide block in viewport` toggle; `Mute from / to` (s) editors for a time-window mute |
+| **Mute / Hide** | `Mute (no audio, forever)` toggle; `Hide block in viewport` toggle; **`Mute Schedule...`** button that opens a floating editor where you can add any number of timed mute windows (start + duration, in seconds).  The button label shows the active window count, e.g. `Mute Schedule (3)...`. |
 | **One-click** | `Match Duration to Sound` — sets region duration to the loaded sample's natural length, preserving any recorded movement span |
 | **Audio analysis** | Pitch line (Hz / note / duration / period) + filled-blue oscilloscope graph for the loaded sample |
 | **Movement map** | Top-down keyframe path graph (when movement is recorded) |
@@ -484,11 +485,11 @@ Each block record includes:
 - Movement controls — `movementEnabled`, `playbackMode` (Natural / Loop / Stretch / Speed), `movementDurationSec`, `movementYOffset`
 - Loop controls — `isLooping`, `loopDurationSec`, `loopBufferSec`
 - Per-block flags — `isMuted`, `isHidden`
-- Mute-window — `muteStartSec`, `muteEndSec`
+- Mute schedule — `muteWindows` vector of `{ startSec, durationSec }` entries
 
 ### File Format
 
-The `.sime` format uses a 12-byte header (`SIME` magic, version, block count) followed by tightly packed block records.  The current version is **v8**.  Older files (v5 / v6 / v7) still load — additive trailing fields fall back to sensible defaults.  Anything written by the current build is **not** readable by older binaries.
+The `.sime` format uses a 12-byte header (`SIME` magic, version, block count) followed by tightly packed block records.  The current version is **v9**.  Older files (v5 / v6 / v7 / v8) still load — additive trailing fields fall back to sensible defaults, and v8's single `muteStartSec` / `muteEndSec` pair is auto-migrated into the first entry of `muteWindows`.  Anything written by the current build is **not** readable by older binaries.
 
 ### Auto-Save
 
@@ -508,7 +509,8 @@ When the app closes, it saves the current scene to `%APPDATA%/SIME/autosave.sime
 You can bounce the **full mixed stereo output** for the entire timeline (from time 0 through the latest block end time) to a file. This is an **offline** render: it does not play through the speakers; it steps the same `TransportClock` + `SequencerEngine` logic in small time slices and mixes with the same gain, pan, and pitch rules as `AudioEngine`.
 
 - **File → Export Audio…** — choose a format, then a save path.
-- **Formats** — **WAV** and **AIFF** (16-bit PCM, lossless), **FLAC** (lossless), **Ogg Vorbis** (lossy). MP3 and AAC/M4A are not shipped in this build because JUCE does not provide a working MP3 encoder on all platforms, and AAC depends on OS-specific APIs; see the detailed report for extension options.
+- **Formats** — **WAV** and **AIFF** (16-bit PCM, lossless), **FLAC** (lossless), **Ogg Vorbis** (lossy).
+- **Why no MP3 / MP4?** JUCE's built-in `juce_audio_formats` module is read-only for MP3 and does not ship an MP4 / AAC encoder.  Adding either one means **either** bundling a third-party encoder into the build (LAME for MP3 — LGPL; an AAC encoder for MP4 — patent-encumbered) **or** shelling out to a tool like FFmpeg at export time, which requires the user to have FFmpeg installed.  Both options were considered for this build; the current decision is to keep the export pipeline dependency-free.  If you need MP3 / MP4, export to WAV and run a free online converter — the WAV is the same audio you'd get out of any encoder we add.
 - **Length** — matches the timeline span (same idea as the transport bar duration: maximum of all blocks’ `endTimeSec()`). Empty scenes cannot be exported.
 - **Sample rate** — matches the live audio device rate when possible; if the chosen file format only supports specific rates, the exporter picks the closest supported rate.
 
@@ -544,7 +546,7 @@ Speaker output
 
 **`AudioEngine`** — receives events via a `juce::AbstractFifo`-backed queue. Maintains a flat list of `ActiveVoice` instances, each with a sample read cursor, gain, pitch rate, and stereo pan. Runs mixing in the audio callback — no allocations, no locks.
 
-**`BlockEntry`** — the shared data structure. Carries position, block type, sound ID, start/duration timing, playback state flags, recorded movement path (`std::vector<MovementKeyFrame>`), playback mode (`Natural / Loop / Stretch / Speed`), movement duration / Y-lift / enabled flag, loop length / loop gap, per-block mute / hide flags, mute-window endpoints, and transient runtime flags (`effectiveMuted`, `wasMutedLastTick`, `sampleNaturalDurationSec`).
+**`BlockEntry`** — the shared data structure. Carries position, block type, sound ID, start/duration timing, playback state flags, recorded movement path (`std::vector<MovementKeyFrame>`), playback mode (`Natural / Loop / Stretch / Speed`), movement duration / Y-lift / enabled flag, loop length / loop gap, per-block mute / hide flags, a `muteWindows` vector of scheduled silence ranges (`MuteWindow { startSec, durationSec }`), and transient runtime flags (`effectiveMuted`, `wasMutedLastTick`, `sampleNaturalDurationSec`).
 
 **`AudioAnalysis`** — offline pitch (autocorrelation F0) + waveform-envelope helper called by the sidebar when a block is selected.
 
@@ -752,6 +754,27 @@ To fix the editor cosmetics only, add `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to th
 * Loop toggle "turns off inconsistently" — Loop UI consolidated in the
   sidebar Info panel; the popup no longer carries its own toggle.
 
+### Fixed after the 2026-05-23 session
+
+* **Loop length editor + "= Block Dur." button floated over the sidebar
+  header when scrolling** — they bypassed the `placeRow` helper and used
+  raw `setBounds(x, y, ...)` with the unscrolled logical y.  Now go
+  through a `placeRowPair` helper that applies the scroll offset and the
+  same offscreen-clip rule as the other rows.
+* **"Movement" graph label clipped into the oscilloscope** — the label
+  was painted at `graphArea.getY() - 16` but the previous row only left a
+  10-px gap, so the label was drawn straight on top of the wave's bottom
+  edge.  `paint()` now reserves the same 16-px label band that
+  `resized()` already allocates.
+
+### Added after the 2026-05-23 session
+
+* **Mute Schedule popup** — replaces the inline "Mute from / to" editor
+  pair with a floating, scrollable editor that holds any number of
+  scheduled mute windows (`MuteWindow { startSec, durationSec }`) per
+  block.  Scene format bumped to v9; v8 files auto-migrate their single
+  window into the new vector.
+
 See [`md files/SESSION_2026-05-23_REPORT.md`](md%20files/SESSION_2026-05-23_REPORT.md)
 for the full bug log + root causes.
 
@@ -802,4 +825,6 @@ for the full bug log + root causes.
 * **Block-type change mid-movement** (e.g. violin → piano halfway)
 * **MP3 / AAC export** — extend `SceneAudioExporter::Format` (see the
   "How to extend" section of [`SESSION_2026-05-23_REPORT.md`](md%20files/SESSION_2026-05-23_REPORT.md))
-
+* **Fix the control+c and control+v option to add copy paste, work on control+a as well**
+* **UI change for Loop and Loop Gap button in block info page**
+* **Click-and-drag multi-select** for bulk mute / hide / assigning the same sound if same type / copying

@@ -27,6 +27,23 @@ struct MovementKeyFrame
     Vec3i  position;  // Absolute world position at this keyframe
 };
 
+/// A single scheduled mute window for a block.  When the playhead is inside
+/// [startSec, startSec + durationSec), the block is silenced (movement and
+/// other state still play).  Blocks may carry any number of these — see
+/// `BlockEntry::muteWindows` and the Mute Schedule popup.
+struct MuteWindow
+{
+    double startSec    = 0.0;
+    double durationSec = 0.0;
+
+    bool isActive() const noexcept { return durationSec > 0.0; }
+    double endSec()  const noexcept { return startSec + durationSec; }
+    bool contains(double t) const noexcept
+    {
+        return isActive() && t >= startSec && t < endSec();
+    }
+};
+
 /// Per-block playback behaviour for the WAV vs the block's region duration.
 ///
 /// Natural  – sound plays once; if shorter than the region, the rest is silent.
@@ -167,12 +184,26 @@ struct BlockEntry
     /// 0 = tight loop (the existing behaviour).
     double loopBufferSec = 0.0;
 
-    /// Time-window mute (in transport seconds, absolute).  When
-    /// muteEndSec > muteStartSec, the audio engine silences this block while
-    /// the playhead is inside [muteStartSec, muteEndSec).  Movement and other
-    /// state still play.  Both fields default to 0 (window disabled).
+    /// Legacy single-window mute fields (v8 scene format).
+    /// Kept here only so old `.sime` files still round-trip cleanly — the
+    /// engine now reads `muteWindows` and load() converts these into the
+    /// first entry on import.  Save no longer writes them.
     double muteStartSec = 0.0;
     double muteEndSec   = 0.0;
+
+    /// User-defined mute schedule.  Each entry silences this block while the
+    /// playhead is inside [startSec, startSec + durationSec).  Empty list =
+    /// no scheduled mutes (the "Mute (forever)" toggle is independent).
+    std::vector<MuteWindow> muteWindows;
+
+    /// Returns true if `t` falls inside any of the active mute windows.
+    bool isInsideAnyMuteWindow(double t) const noexcept
+    {
+        for (const auto& w : muteWindows)
+            if (w.contains(t))
+                return true;
+        return false;
+    }
 
     // ── Runtime-only flags (NOT persisted) ───────────────────────────────────
     /// Re-computed every sequencer tick from

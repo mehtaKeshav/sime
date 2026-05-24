@@ -75,8 +75,7 @@ public:
                                double loopBufferSec,
                                bool isLooping,
                                double loopDurationSec,
-                               double muteStartSec,
-                               double muteEndSec);
+                               std::vector<MuteWindow> muteWindows);
 
     /// Resize @p serial's region duration to its loaded sample's natural
     /// length, preserving any recorded movement span.  Safe to call from the
@@ -608,8 +607,8 @@ private:
         // v8 / loop-section additions
         bool    isLooping           = false;
         double  loopDurationSec     = 0.0;
-        double  muteStartSec        = 0.0;
-        double  muteEndSec          = 0.0;
+        // v9: scheduled mute windows (replaces single muteStartSec/muteEndSec)
+        std::vector<MuteWindow> muteWindows;
     };
     PendingSidebarEdit    pendingSidebarEdit_;
     juce::CriticalSection sidebarEditMutex_;

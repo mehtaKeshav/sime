@@ -6,6 +6,9 @@
 #include "BlockEntry.h"
 #include "AudioAnalysis.h"
 #include <functional>
+#include <memory>
+
+class MuteSchedulePopup;
 
 class SidebarComponent : public juce::Component
 {
@@ -62,21 +65,20 @@ public:
     /// doesn't have to pull in BlockEntry.h transitively for downstream
     /// callers that only forward the value.
     std::function<void(
-        int     serial,
-        Vec3i   newPos,
-        double  newStart,
-        double  newDuration,
-        bool    movementEnabled,
-        uint8_t playbackMode,
-        double  movementDurationSec,
-        int     movementYOffset,
-        bool    isMuted,
-        bool    isHidden,
-        double  loopBufferSec,
-        bool    isLooping,
-        double  loopDurationSec,
-        double  muteStartSec,
-        double  muteEndSec
+        int                            serial,
+        Vec3i                          newPos,
+        double                         newStart,
+        double                         newDuration,
+        bool                           movementEnabled,
+        uint8_t                        playbackMode,
+        double                         movementDurationSec,
+        int                            movementYOffset,
+        bool                           isMuted,
+        bool                           isHidden,
+        double                         loopBufferSec,
+        bool                           isLooping,
+        double                         loopDurationSec,
+        std::vector<MuteWindow>        muteWindows
     )> onApplyBlockInfo;
 
     /// Fired when the user clicks "Match Duration to Sound" in the Info panel.
@@ -126,16 +128,27 @@ private:
     // Loop controls (moved from BlockEditPopup so they live next to the gap)
     juce::ToggleButton loopToggle_       { "Loop sound" };
     juce::TextEditor   loopDurationEditor_;                  ///< 0 = full region
-    juce::TextButton   matchLoopDurBtn_  { "Loop = Block Dur." };
+    // Short label so the button never truncates inside the sidebar's narrow
+    // editor column.  Tooltip still describes the action in full.
+    juce::TextButton   matchLoopDurBtn_  { "= Block" };
     juce::TextEditor   loopBufferEditor_;                    ///< Silence between repeats (s)
 
     // Per-block flags
     juce::ToggleButton muteToggle_   { "Mute (no audio, forever)" };
     juce::ToggleButton hideToggle_   { "Hide block in viewport" };
 
-    // Time-window mute (silence the block while the playhead is inside)
-    juce::TextEditor  muteStartEditor_;
-    juce::TextEditor  muteEndEditor_;
+    // Opens the floating MuteSchedulePopup so the user can add / edit /
+    // remove timed mute windows for the selected block.
+    juce::TextButton  muteScheduleBtn_ { "Mute Schedule..." };
+
+    /// Working copy of the scheduled mute windows for the block currently
+    /// shown in the Info panel.  Edited live by the MuteSchedulePopup and
+    /// pushed downstream when the user clicks Apply.
+    std::vector<MuteWindow> muteWindowsDraft_;
+
+    /// Lazily-created popup window so we don't construct it for users who
+    /// never open the Info panel.
+    std::unique_ptr<MuteSchedulePopup> muteSchedulePopup_;
 
     // One-click: match the block's region duration to the loaded sample length
     juce::TextButton matchSoundDurBtn_ { "Match Duration to Sound" };

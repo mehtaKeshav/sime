@@ -260,11 +260,9 @@ std::vector<SequencerEvent> SequencerEngine::update(const TransportClock& clock,
         // ── Compute the block's current mute state ─────────────────────────
         //   * effectiveMuted = per-block isMuted + per-type indefinite mute
         //     (set by ViewPortComponent before calling update()).
-        //   * Time-window mute kicks in when the playhead is inside
-        //     [muteStartSec, muteEndSec).
-        const bool windowMute = (block.muteEndSec > block.muteStartSec
-                                 && now >= block.muteStartSec
-                                 && now <  block.muteEndSec);
+        //   * Scheduled mute windows silence the block whenever the playhead
+        //     is inside any [startSec, startSec + durationSec) range.
+        const bool windowMute = block.isInsideAnyMuteWindow(now);
         const bool isMutedNow = block.effectiveMuted || windowMute;
 
         // Natural sample length — looked up by the engine, but we don't have

@@ -1,5 +1,6 @@
 #include "SidebarComponent.h"
 #include "BlockEntry.h"
+#include "MuteSchedulePopup.h"
 
 SidebarComponent::SidebarComponent()
 {
@@ -19,8 +20,7 @@ SidebarComponent::SidebarComponent()
     addAndMakeVisible(loopBufferEditor_);
     addAndMakeVisible(muteToggle_);
     addAndMakeVisible(hideToggle_);
-    addAndMakeVisible(muteStartEditor_);
-    addAndMakeVisible(muteEndEditor_);
+    addAndMakeVisible(muteScheduleBtn_);
     addAndMakeVisible(matchSoundDurBtn_);
     addAndMakeVisible(applyButton);
     addAndMakeVisible(resetDefaultsBtn_);
@@ -35,8 +35,49 @@ SidebarComponent::SidebarComponent()
     pathYOffsetEditor_.setInputRestrictions(0, "-0123456789");
     loopBufferEditor_.setInputRestrictions(0, "0123456789.");
     loopDurationEditor_.setInputRestrictions(0, "0123456789.");
-    muteStartEditor_.setInputRestrictions(0, "0123456789.");
-    muteEndEditor_  .setInputRestrictions(0, "0123456789.");
+
+    muteScheduleBtn_.setColour(juce::TextButton::buttonColourId,
+                               juce::Colour(0xff242a3c));
+    muteScheduleBtn_.setColour(juce::TextButton::textColourOffId,
+                               juce::Colour(0xffe2e6f2));
+    muteScheduleBtn_.setTooltip(
+        "Open the advanced mute scheduler to silence this block "
+        "for one or more time windows.");
+    muteScheduleBtn_.onClick = [this]
+    {
+        if (!selectedBlock_) return;
+
+        if (!muteSchedulePopup_)
+        {
+            muteSchedulePopup_ = std::make_unique<MuteSchedulePopup>();
+            muteSchedulePopup_->onApply =
+                [this](int serial, std::vector<MuteWindow> windows)
+            {
+                if (!selectedBlock_ || selectedBlock_->serial != serial)
+                    return;
+                muteWindowsDraft_ = std::move(windows);
+                // Pushing through Apply gives the user a single canonical
+                // commit path; otherwise the draft would silently override
+                // whatever's already on the block.
+                if (applyButton.onClick)
+                    applyButton.onClick();
+            };
+            muteSchedulePopup_->onDismiss = [] {};
+        }
+
+        const juce::String name = selectedDisplayName_.isNotEmpty()
+            ? selectedDisplayName_
+            : juce::String("Block ") + juce::String(selectedBlock_->serial);
+
+        muteSchedulePopup_->setSchedule(selectedBlock_->serial,
+                                        name,
+                                        muteWindowsDraft_);
+
+        const auto screenPos = muteScheduleBtn_.localPointToGlobal(
+            juce::Point<int>(muteScheduleBtn_.getWidth(),
+                             muteScheduleBtn_.getHeight() / 2));
+        muteSchedulePopup_->showAt(screenPos);
+    };
 
     matchSoundDurBtn_.onClick = [this]
     {
@@ -44,6 +85,9 @@ SidebarComponent::SidebarComponent()
             onMatchDurationToSound(selectedBlock_->serial);
     };
 
+    matchLoopDurBtn_.setTooltip(
+        "Set the loop length to match the block's full region duration "
+        "(quick way to say \"loop fills the whole region\").");
     matchLoopDurBtn_.onClick = [this]
     {
         // Mirror the current block-duration value into the loop-duration
@@ -88,8 +132,6 @@ SidebarComponent::SidebarComponent()
         const bool   isHidden = hideToggle_.getToggleState();
         const bool   isLoop   = loopToggle_.getToggleState();
         const double loopDur  = loopDurationEditor_.getText().getDoubleValue();
-        const double muteSt   = muteStartEditor_.getText().getDoubleValue();
-        const double muteEn   = muteEndEditor_  .getText().getDoubleValue();
 
         // The Loop toggle is the canonical source of truth for the playback
         // mode now that the popup loop button is gone.  Force the combo to
@@ -103,7 +145,7 @@ SidebarComponent::SidebarComponent()
         onApplyBlockInfo(serial, newPos, newStart, newDuration, movementEn,
                          effectiveMode, movDur, yOff,
                          isMuted, isHidden, loopBuf,
-                         isLoop, loopDur, muteSt, muteEn);
+                         isLoop, loopDur, muteWindowsDraft_);
     };
 
     resetDefaultsBtn_.onClick = [this]
@@ -119,11 +161,10 @@ SidebarComponent::SidebarComponent()
         pathYOffsetEditor_.setText("0", juce::dontSendNotification);
         loopBufferEditor_.setText("0", juce::dontSendNotification);
         loopDurationEditor_.setText("0", juce::dontSendNotification);
-        muteStartEditor_.setText("0", juce::dontSendNotification);
-        muteEndEditor_  .setText("0", juce::dontSendNotification);
         loopToggle_.setToggleState(false, juce::dontSendNotification);
         muteToggle_.setToggleState(false, juce::dontSendNotification);
         hideToggle_.setToggleState(false, juce::dontSendNotification);
+        muteWindowsDraft_.clear();
 
         Vec3i pos {
             xEditor.getText().getIntValue(),
@@ -138,17 +179,24 @@ SidebarComponent::SidebarComponent()
                          (uint8_t) BlockPlaybackMode::Natural,
                          0.0, 0,
                          false, false, 0.0,
-                         false, 0.0, 0.0, 0.0);
+                         false, 0.0,
+                         std::vector<MuteWindow>{});
     };
 
     toggleButton.onClick = [this]()
     {
         // ☰ = \xe2\x98\xb0  (U+2630 TRIGRAM FOR HEAVEN / hamburger)
         // ✕ = \xe2\x9c\x95  (U+2715 MULTIPLICATION X)
+        //
+        // The icon shows the action the click will take *next*, so:
+        //   * sidebar open    → show ✕  ("click to close")
+        //   * sidebar closed  → show ☰  ("click to open")
+        // We have to flip the state first and *then* set the icon — using
+        // the pre-flip state was the source of the swapped-icon bug.
+        setCollapsed(!isCollapsed());
         toggleButton.setButtonText(isCollapsed()
             ? juce::CharPointer_UTF8("\xe2\x98\xb0")
             : juce::CharPointer_UTF8("\xe2\x9c\x95"));
-        setCollapsed(!isCollapsed());
     };
     addAndMakeVisible(blockListButton);
     blockListButton.onClick = [this]()
@@ -237,8 +285,7 @@ void SidebarComponent::resized()
         loopBufferEditor_.setBounds(0, 0, 0, 0);
         muteToggle_.setBounds(0, 0, 0, 0);
         hideToggle_.setBounds(0, 0, 0, 0);
-        muteStartEditor_.setBounds(0, 0, 0, 0);
-        muteEndEditor_.setBounds(0, 0, 0, 0);
+        muteScheduleBtn_.setBounds(0, 0, 0, 0);
         matchSoundDurBtn_.setBounds(0, 0, 0, 0);
         applyButton.setBounds(0, 0, 0, 0);
         resetDefaultsBtn_.setBounds(0, 0, 0, 0);
@@ -269,8 +316,7 @@ void SidebarComponent::resized()
     loopBufferEditor_.setBounds(0, 0, 0, 0);
     muteToggle_.setBounds(0, 0, 0, 0);
     hideToggle_.setBounds(0, 0, 0, 0);
-    muteStartEditor_.setBounds(0, 0, 0, 0);
-    muteEndEditor_.setBounds(0, 0, 0, 0);
+    muteScheduleBtn_.setBounds(0, 0, 0, 0);
     matchSoundDurBtn_.setBounds(0, 0, 0, 0);
     applyButton.setBounds(0, 0, 0, 0);
     resetDefaultsBtn_.setBounds(0, 0, 0, 0);
@@ -317,7 +363,41 @@ void SidebarComponent::resized()
         }
     };
 
+    // Two-column variant: places two components side-by-side on the same
+    // logical row, with the same scroll-clip behaviour as placeRow.  Used
+    // by the loop-length editor + "= Block Dur." button row, which used to
+    // bypass placeRow and float over the header on scroll.
+    auto placeRowPair = [&](juce::Component& a, juce::Component& b,
+                            int logicalY,
+                            int xA, int wA, int xB, int wB, int h)
+    {
+        const int yScreen = logicalY - infoScrollY_;
+        const bool offscreen = (yScreen + h <= infoScrollAreaTop_
+                                || yScreen >= infoScrollAreaBot_);
+        if (offscreen)
+        {
+            a.setBounds(0, 0, 0, 0);
+            b.setBounds(0, 0, 0, 0);
+        }
+        else
+        {
+            a.setBounds(xA, yScreen, wA, h);
+            b.setBounds(xB, yScreen, wB, h);
+        }
+    };
+
     int y = infoScrollAreaTop_;
+
+    // Vertical budget for a "MOVEMENT" / "LOOP" / "MUTE" section header:
+    //   * `kSectionGapPre`  — breathing room above the label
+    //   * label drawn in paint() at this offset (height 14)
+    //   * `kSectionGapPost` — gap between the label and the first row below
+    // paint() and resized() both add `kSectionBandH` exactly once per section
+    // so labels stay aligned with their controls regardless of scroll.
+    constexpr int kSectionGapPre  = 10;
+    constexpr int kSectionLabelH  = 14;
+    constexpr int kSectionGapPost = 6;
+    constexpr int kSectionBandH   = kSectionGapPre + kSectionLabelH + kSectionGapPost;
 
     placeRow(xEditor, y, editorX, editorW, editorH);
     y += editorH + rowGap;
@@ -326,16 +406,18 @@ void SidebarComponent::resized()
     y += editorH + rowGap;
 
     placeRow(zEditor, y, editorX, editorW, editorH);
-    y += editorH + 24;
+    y += editorH + rowGap;
 
     placeRow(startEditor, y, editorX, editorW, editorH);
     y += editorH + rowGap;
 
     placeRow(durationEditor, y, editorX, editorW, editorH);
-    y += editorH + 24;
+
+    // ── MOVEMENT section ───────────────────────────────────────────────────
+    y += editorH + kSectionBandH;
 
     placeRow(movementEnabledToggle, y, margin, getWidth() - 2 * margin, 28);
-    y += 36;
+    y += 32;
 
     placeRow(modeCombo_, y, editorX, editorW, editorH);
     y += editorH + rowGap;
@@ -344,21 +426,27 @@ void SidebarComponent::resized()
     y += editorH + rowGap;
 
     placeRow(pathYOffsetEditor_, y, editorX, editorW, editorH);
-    y += editorH + 16;
 
-    // ── Loop section (toggle, loop duration + match-block button, gap) ─────
+    // ── LOOP section ───────────────────────────────────────────────────────
+    y += editorH + kSectionBandH;
+
     placeRow(loopToggle_, y, margin, getWidth() - 2 * margin, 26);
     y += 30;
 
-    const int matchBtnW = 110;
-    loopDurationEditor_.setBounds(editorX, y,
-                                  std::max(40, editorW - matchBtnW - 6), editorH);
-    matchLoopDurBtn_.setBounds(editorX + std::max(40, editorW - matchBtnW - 6) + 6,
-                               y, matchBtnW, editorH);
+    // Narrower button now that the label is just "= Block"; gives the loop
+    // duration editor a comfortable amount of width.
+    const int matchBtnW = 72;
+    const int loopEditorW = std::max(40, editorW - matchBtnW - 6);
+    placeRowPair(loopDurationEditor_, matchLoopDurBtn_, y,
+                 editorX,                   loopEditorW,
+                 editorX + loopEditorW + 6, matchBtnW,
+                 editorH);
     y += editorH + rowGap;
 
     placeRow(loopBufferEditor_, y, editorX, editorW, editorH);
-    y += editorH + 16;
+
+    // ── MUTE section ───────────────────────────────────────────────────────
+    y += editorH + kSectionBandH;
 
     placeRow(muteToggle_, y, margin, getWidth() - 2 * margin, 26);
     y += 30;
@@ -366,12 +454,10 @@ void SidebarComponent::resized()
     placeRow(hideToggle_, y, margin, getWidth() - 2 * margin, 26);
     y += 30;
 
-    // Time-window mute: two editors share one row, "from"/"to" labels are
-    // painted in paint() to keep this layout block tight.
-    const int halfW = (editorW - 6) / 2;
-    muteStartEditor_.setBounds(editorX,                y, halfW, editorH);
-    muteEndEditor_  .setBounds(editorX + halfW + 6,    y, halfW, editorH);
-    y += editorH + 16;
+    // "Mute Schedule..." button takes the row that used to host the inline
+    // from/to editors.  Advanced mute settings live in the popup now.
+    placeRow(muteScheduleBtn_, y, margin, getWidth() - 2 * margin, editorH);
+    y += editorH + 12;
 
     placeRow(matchSoundDurBtn_, y, margin, getWidth() - 2 * margin, 28);
     y += 36;
@@ -574,6 +660,35 @@ void SidebarComponent::paint(juce::Graphics& g)
         g.setFont(juce::Font("Public Sans", 13.0f, juce::Font::plain));
         g.setColour(text);
 
+        // Section-header band constants — MUST match the values used in
+        // resized() exactly, or the labels will drift off their controls
+        // when the user scrolls.
+        constexpr int kSectionGapPre  = 10;
+        constexpr int kSectionLabelH  = 14;
+        constexpr int kSectionGapPost = 6;
+        constexpr int kSectionBandH   = kSectionGapPre
+                                      + kSectionLabelH
+                                      + kSectionGapPost;
+
+        auto drawSectionHeader = [&](const juce::String& headerText, int bandTopY)
+        {
+            const int labelY = bandTopY + kSectionGapPre;
+            g.setFont(juce::Font("Public Sans", 11.0f, juce::Font::bold));
+            g.setColour(juce::Colour(0xff6a9fd8));
+            g.drawText(headerText,
+                       margin, labelY,
+                       getWidth() - 2 * margin, kSectionLabelH,
+                       juce::Justification::centredLeft);
+
+            // Subtle hairline beneath the section label.
+            g.setColour(juce::Colour(0xff222a3e));
+            g.fillRect(margin, labelY + kSectionLabelH + 2,
+                       getWidth() - 2 * margin, 1);
+
+            g.setFont(juce::Font("Public Sans", 13.0f, juce::Font::plain));
+            g.setColour(text);
+        };
+
         g.drawText("X:", margin, y, labelW, editorH, juce::Justification::centredLeft);
         y += editorH + rowGap;
 
@@ -581,17 +696,20 @@ void SidebarComponent::paint(juce::Graphics& g)
         y += editorH + rowGap;
 
         g.drawText("Z:", margin, y, labelW, editorH, juce::Justification::centredLeft);
-        y += editorH + 24;
+        y += editorH + rowGap;
 
         g.drawText("Start:", margin, y, labelW, editorH, juce::Justification::centredLeft);
         y += editorH + rowGap;
 
         g.drawText("Duration:", margin, y, labelW, editorH, juce::Justification::centredLeft);
-        y += editorH + 24;
+        y += editorH;
 
-        // Movement toggle row label is drawn by the toggle itself; skip the
-        // toggle height (28) + 36-px row gap that matches resized().
-        y += 28 + 8;
+        // ── MOVEMENT section ─────────────────────────────────────────────
+        drawSectionHeader("MOVEMENT", y);
+        y += kSectionBandH;
+
+        // Movement toggle row label is drawn by the toggle itself.
+        y += 32;
 
         g.drawText("Mode:",         margin, y, labelW, editorH, juce::Justification::centredLeft);
         y += editorH + rowGap;
@@ -600,28 +718,33 @@ void SidebarComponent::paint(juce::Graphics& g)
         y += editorH + rowGap;
 
         g.drawText("Path Y lift:",  margin, y, labelW, editorH, juce::Justification::centredLeft);
-        y += editorH + 16;
+        y += editorH;
+
+        // ── LOOP section ────────────────────────────────────────────────
+        drawSectionHeader("LOOP", y);
+        y += kSectionBandH;
 
         // Loop toggle row (no left-side label — the toggle draws its own).
         y += 30;
 
-        // Loop duration row + "= Block Dur." button.
         g.drawText("Loop length:", margin, y, labelW, editorH, juce::Justification::centredLeft);
         y += editorH + rowGap;
 
-        // Loop gap row.
         g.drawText("Loop gap (s):", margin, y, labelW, editorH, juce::Justification::centredLeft);
-        y += editorH + 16;
+        y += editorH;
+
+        // ── MUTE section ────────────────────────────────────────────────
+        drawSectionHeader("MUTE / HIDE", y);
+        y += kSectionBandH;
 
         // Mute / Hide toggle rows.
         y += 30;   // mute toggle
         y += 30;   // hide toggle
 
-        // Mute-window row: paint the "Mute from/to" labels in line with the
-        // shared-row editors set up in resized().
-        g.drawText("Mute from / to:", margin, y, labelW, editorH,
-                   juce::Justification::centredLeft);
-        y += editorH + 16;
+        // The "Mute Schedule" button draws its own label (with a count of
+        // active windows — see showBlockInfo()).  Just advance y to skip
+        // the row resized() reserved for it.
+        y += editorH + 12;
 
         // Match-to-sound button row.
         y += 36;
@@ -669,6 +792,14 @@ void SidebarComponent::paint(juce::Graphics& g)
         audioWaveformGraph(g, waveArea);
         y += kWaveH + 10;
 
+        // Reserve the same 16-px label band that resized() allocates above
+        // the movement graph.  Without this, the "Movement" label is drawn
+        // 16 px above the graph rect — i.e. straight on top of the wave's
+        // bottom edge — and looks like it's been clipped.
+        constexpr int kMovementLabelH = 16;
+        const int movementLabelY = y;
+        y += kMovementLabelH;
+
         juce::Rectangle<int> graphArea(
             margin,
             y,
@@ -679,8 +810,8 @@ void SidebarComponent::paint(juce::Graphics& g)
         g.setFont(juce::Font("Public Sans", 12.0f, juce::Font::bold));
         g.setColour(juce::Colour(0xff6a9fd8));
         g.drawText("Movement",
-                   margin, graphArea.getY() - 16,
-                   getWidth() - 2 * margin, 14,
+                   margin, movementLabelY,
+                   getWidth() - 2 * margin, kMovementLabelH,
                    juce::Justification::centredLeft);
 
         movementGraph(g, *selectedBlock_, graphArea);
@@ -750,10 +881,22 @@ void SidebarComponent::showBlockInfo(const BlockEntry& block,
                                 juce::dontSendNotification);
     muteToggle_.setToggleState(block.isMuted,  juce::dontSendNotification);
     hideToggle_.setToggleState(block.isHidden, juce::dontSendNotification);
-    muteStartEditor_.setText(juce::String(block.muteStartSec, 2),
-                             juce::dontSendNotification);
-    muteEndEditor_  .setText(juce::String(block.muteEndSec,   2),
-                             juce::dontSendNotification);
+
+    muteWindowsDraft_ = block.muteWindows;
+    const int n = (int) muteWindowsDraft_.size();
+    muteScheduleBtn_.setButtonText(
+        n > 0 ? ("Mute Schedule (" + juce::String(n) + ")...")
+              : juce::String("Mute Schedule..."));
+
+    // If the popup was open for a different block, refresh its contents so
+    // it doesn't keep editing the previous selection.
+    if (muteSchedulePopup_ && muteSchedulePopup_->isVisible())
+    {
+        const juce::String name = selectedDisplayName_.isNotEmpty()
+            ? selectedDisplayName_
+            : juce::String("Block ") + juce::String(block.serial);
+        muteSchedulePopup_->setSchedule(block.serial, name, muteWindowsDraft_);
+    }
 
     const bool loopOn = block.isLooping
                      || block.playbackMode == BlockPlaybackMode::Loop;
@@ -808,11 +951,13 @@ void SidebarComponent::clearSelectedBlock()
     pathYOffsetEditor_.setText({}, juce::dontSendNotification);
     loopBufferEditor_.setText({}, juce::dontSendNotification);
     loopDurationEditor_.setText({}, juce::dontSendNotification);
-    muteStartEditor_.setText({}, juce::dontSendNotification);
-    muteEndEditor_  .setText({}, juce::dontSendNotification);
     loopToggle_.setToggleState(false,  juce::dontSendNotification);
     muteToggle_.setToggleState(false,  juce::dontSendNotification);
     hideToggle_.setToggleState(false,  juce::dontSendNotification);
+    muteWindowsDraft_.clear();
+    muteScheduleBtn_.setButtonText("Mute Schedule...");
+    if (muteSchedulePopup_)
+        muteSchedulePopup_->hide();
     audioAnalysis_ = {};
     infoScrollY_ = 0;
 

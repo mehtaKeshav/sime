@@ -10,7 +10,7 @@
 namespace
 {
     static constexpr char     kMagic[4] = { 'S', 'I', 'M', 'E' };
-    static constexpr uint16_t kVersion  = 8;   // v8: adds muteStartSec, muteEndSec
+    static constexpr uint16_t kVersion  = 9;   // v9: replaces muteStartSec/muteEndSec with a muteWindows vector
 
     // Tiny endian-agnostic helpers (no-op on x86 but keeps intent clear)
     template <typename T>
@@ -93,9 +93,19 @@ bool SceneFile::save(const std::string& path, const std::vector<BlockEntry>& blo
         writeVal<uint8_t>(f, b.isHidden ? 1 : 0);
         writeVal<double>(f, b.loopBufferSec);
 
-        // --- v8 additions: time-window mute ---
-        writeVal<double>(f, b.muteStartSec);
-        writeVal<double>(f, b.muteEndSec);
+        // --- v8 additions: legacy single time-window mute ---
+        // We still write zeros here so v8 readers don't see garbage; the
+        // real schedule now lives in muteWindows below (v9+).
+        writeVal<double>(f, 0.0);
+        writeVal<double>(f, 0.0);
+
+        // --- v9 additions: scheduled mute windows (multi-window) ---
+        writeVal<uint32_t>(f, static_cast<uint32_t>(b.muteWindows.size()));
+        for (const auto& w : b.muteWindows)
+        {
+            writeVal<double>(f, w.startSec);
+            writeVal<double>(f, w.durationSec);
+        }
     }
 
     return f.good();
@@ -277,6 +287,36 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
         {
             if (!readVal(f, b.muteStartSec)) return false;
             if (!readVal(f, b.muteEndSec))   return false;
+
+            // v8 → v9 migration: lift the legacy single window into the new
+            // muteWindows vector so the audio engine actually applies it.
+            if (version == 8
+                && b.muteEndSec > b.muteStartSec
+                && b.muteWindows.empty())
+            {
+                b.muteWindows.push_back({ b.muteStartSec,
+                                          b.muteEndSec - b.muteStartSec });
+            }
+        }
+
+        if (version >= 9)
+        {
+            uint32_t winCount = 0;
+            if (!readVal(f, winCount)) return false;
+
+            // Sanity guard against corrupted files claiming a giant count.
+            if (winCount > 4096) return false;
+
+            b.muteWindows.clear();
+            b.muteWindows.reserve(winCount);
+            for (uint32_t w = 0; w < winCount; ++w)
+            {
+                MuteWindow win;
+                if (!readVal(f, win.startSec))    return false;
+                if (!readVal(f, win.durationSec)) return false;
+                if (win.durationSec > 0.0)
+                    b.muteWindows.push_back(win);
+            }
         }
 
         b.resetPlaybackState();

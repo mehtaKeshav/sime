@@ -173,13 +173,13 @@ MainComponent::MainComponent()
                                       bool isMuted, bool isHidden,
                                       double loopBufferSec,
                                       bool isLooping, double loopDurationSec,
-                                      double muteStartSec, double muteEndSec)
+                                      std::vector<MuteWindow> muteWindows)
     {
         view.applySidebarBlockInfo(serial, pos, start, duration, movementEnabled,
                                    playbackMode, movementDurationSec, movementYOffset,
                                    isMuted, isHidden, loopBufferSec,
                                    isLooping, loopDurationSec,
-                                   muteStartSec, muteEndSec);
+                                   muteWindows);
 
         // Optimistic sidebar refresh — getBlockBySerial reads a snapshot that
         // may lag one frame behind the GL-thread apply, so merge form values
@@ -214,8 +214,7 @@ MainComponent::MainComponent()
         display.loopBufferSec       = loopBufferSec;
         display.isLooping           = isLooping;
         display.loopDurationSec     = loopDurationSec;
-        display.muteStartSec        = muteStartSec;
-        display.muteEndSec          = muteEndSec;
+        display.muteWindows         = std::move(muteWindows);
         if (!display.recordedMovement.empty())
             display.hasRecordedMovement = true;
 

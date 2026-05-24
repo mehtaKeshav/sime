@@ -28,6 +28,7 @@ target_sources(SIME PRIVATE
     Source/SequencerEngine.cpp
     Source/TransportClock.cpp
     Source/Blockeditpopup.cpp
+    Source/MuteSchedulePopup.cpp
     Source/TransportBarComponent.cpp
     Source/SceneFile.cpp
     Source/SceneAudioExporter.cpp
@@ -45,6 +46,16 @@ target_compile_definitions(SIME PRIVATE
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SIME,JUCE_PRODUCT_NAME>"
     JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:SIME,JUCE_VERSION>"
 )
+
+# Force MSVC to read source files as UTF-8 and emit UTF-8 narrow string
+# literals.  Without this, multi-byte characters like '·' (U+00B7) or '—'
+# (U+2014) embedded in our string literals get reinterpreted as Windows-1252
+# at compile time, then re-encoded back into UTF-8 by JUCE -> they render
+# on screen as "Â·" / garbage glyphs.  The /utf-8 switch is a no-op on any
+# non-MSVC compiler (g++/clang already treat sources as UTF-8 by default).
+if (MSVC)
+    target_compile_options(SIME PRIVATE /utf-8)
+endif()
 
 target_link_libraries(SIME PRIVATE
     juce::juce_core
