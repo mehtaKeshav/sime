@@ -70,6 +70,36 @@ Vec3f Raycaster::screenToRay(float mouseX, float mouseY,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// worldToScreen  (inverse of screenToRay for a point, not a direction)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool Raycaster::worldToScreen(Vec3f world,
+                              float screenW, float screenH,
+                              const Mat4& view,
+                              const Mat4& proj,
+                              float& outX, float& outY)
+{
+    const Mat4 mvp = proj * view;
+
+    const float wx = world.x, wy = world.y, wz = world.z;
+
+    const float cx = mvp.m[0] * wx + mvp.m[4] * wy + mvp.m[8]  * wz + mvp.m[12];
+    const float cy = mvp.m[1] * wx + mvp.m[5] * wy + mvp.m[9]  * wz + mvp.m[13];
+    const float cw = mvp.m[3] * wx + mvp.m[7] * wy + mvp.m[11] * wz + mvp.m[15];
+
+    if (cw <= 1e-5f)
+        return false;
+
+    const float invW = 1.f / cw;
+    const float ndcX = cx * invW;
+    const float ndcY = cy * invW;
+
+    outX = (ndcX * 0.5f + 0.5f) * screenW;
+    outY = (-ndcY * 0.5f + 0.5f) * screenH;
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // cast  –  Amanatides & Woo DDA grid traversal
 //
 // For each axis, we track:

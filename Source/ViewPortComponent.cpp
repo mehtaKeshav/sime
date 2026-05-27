@@ -221,6 +221,7 @@ void ViewPortComponent::renderOpenGL()
         blockList.clear();
         nextSerial            = 1;        // start fresh so new blocks begin at 1
         selectedSerial          = -1;
+        multiSelection_.clear();
         highlightedBlockSerial_ = -1;
         hoveredBlockSerial_     = -1;
         recordingBlockSerial    = -1;
@@ -242,6 +243,138 @@ void ViewPortComponent::renderOpenGL()
     if (pendingStop_.exchange(false))
         SequencerEngine::resetAllBlocks(blockList);
 
+    // ── Drain clipboard / multi-selection op ────────────────────────────────
+    {
+        PendingClipboardOp op;
+        {
+            juce::ScopedLock lk(clipboardOpMutex_);
+            op = pendingClipboardOp_;
+            pendingClipboardOp_.type = PendingClipboardOp::None;
+        }
+
+        // Helper: serials we should treat as "currently selected" for a
+        // bulk op.  Primary selection counts as part of the set even when
+        // multiSelection_ is empty.
+        auto effectiveSelection = [this]() -> std::unordered_set<int>
+        {
+            auto out = multiSelection_;
+            if (selectedSerial >= 0)
+                out.insert(selectedSerial);
+            return out;
+        };
+
+        if (op.type == PendingClipboardOp::Copy)
+        {
+            const auto serials = effectiveSelection();
+            clipboardBlocks_.clear();
+            clipboardBlocks_.reserve(serials.size());
+            for (const auto& b : blockList)
+                if (serials.count(b.serial))
+                    clipboardBlocks_.push_back(b);
+        }
+        else if (op.type == PendingClipboardOp::Paste
+                 && !clipboardBlocks_.empty())
+        {
+            // Translate every block by (+1, 0, 0) from its original
+            // position; if the target cell is occupied, keep sliding
+            // further along +X until we find a free cell or give up.
+            // This keeps relative offsets between multi-block pastes.
+            const Vec3i baseDelta { 1, 0, 0 };
+
+            std::vector<int> newlyPasted;
+            newlyPasted.reserve(clipboardBlocks_.size());
+
+            // Track positions claimed during *this* paste so the second
+            // pasted block can't land on the first one we just placed.
+            std::unordered_set<long long> claimedThisPaste;
+            auto packPos = [](const Vec3i& p) -> long long
+            {
+                // Pack into 64 bits — grid is small enough that 21 bits
+                // per axis is plenty.
+                return ( (long long)(p.x + (1 << 20)) << 42 )
+                     | ( (long long)(p.y + (1 << 20)) << 21 )
+                     |   (long long)(p.z + (1 << 20));
+            };
+
+            for (const auto& src : clipboardBlocks_)
+            {
+                Vec3i newPos = src.pos + baseDelta;
+
+                int safety = 0;
+                while ((voxelGrid.contains(newPos)
+                        || claimedThisPaste.count(packPos(newPos))
+                        || !isInBounds(newPos)
+                        || (newPos.x == 0 && newPos.y == 0 && newPos.z == 0))
+                       && safety < 256)
+                {
+                    newPos.x += 1;
+                    ++safety;
+                }
+                if (voxelGrid.contains(newPos)
+                    || claimedThisPaste.count(packPos(newPos))
+                    || !isInBounds(newPos))
+                    continue;   // give up on this entry
+
+                BlockEntry copy = src;
+                copy.serial = nextSerial++;
+                copy.pos    = newPos;
+                copy.resetPlaybackState();
+                // Newly placed copy starts unselected; we'll re-select
+                // them below as a group so the user can keep pasting /
+                // bulk-editing without re-clicking.
+                blockList.push_back(copy);
+                voxelGrid.add(newPos);
+                claimedThisPaste.insert(packPos(newPos));
+                newlyPasted.push_back(copy.serial);
+            }
+
+            if (!newlyPasted.empty())
+            {
+                multiSelection_.clear();
+                for (int s : newlyPasted)
+                    multiSelection_.insert(s);
+                // Promote the first pasted block to primary so the
+                // sidebar Info panel shows something meaningful.
+                selectedSerial          = newlyPasted.front();
+                highlightedBlockSerial_ = selectedSerial;
+
+                renderer.meshDirty = true;
+                pushBlockListToUi(-1);
+
+                const int ser = selectedSerial;
+                juce::MessageManager::callAsync([this, ser]()
+                {
+                    if (onBlockSelected)
+                        onBlockSelected(ser);
+                });
+            }
+        }
+        else if (op.type == PendingClipboardOp::SelectAll)
+        {
+            multiSelection_.clear();
+            for (const auto& b : blockList)
+                multiSelection_.insert(b.serial);
+
+            // If nothing was primary-selected, promote the first block
+            // so single-target sidebar actions still have a target.
+            if (selectedSerial < 0 && !blockList.empty())
+            {
+                selectedSerial          = blockList.front().serial;
+                highlightedBlockSerial_ = selectedSerial;
+                const int ser = selectedSerial;
+                juce::MessageManager::callAsync([this, ser]()
+                {
+                    if (onBlockSelected)
+                        onBlockSelected(ser);
+                });
+            }
+        }
+        else if (op.type == PendingClipboardOp::ClearMulti)
+        {
+            multiSelection_.clear();
+        }
+    }
+
     // ── Load scene from file ────────────────────────────────────────────────
     if (pendingLoad_.exchange(false))
     {
@@ -260,6 +393,8 @@ void ViewPortComponent::renderOpenGL()
             if (b.serial > maxSerial) maxSerial = b.serial;
         }
         nextSerial = maxSerial + 1;
+        selectedSerial = -1;
+        multiSelection_.clear();
         renderer.meshDirty = true;
 
         std::vector<SidebarComponent::Block> uiBlocks;
@@ -403,16 +538,19 @@ void ViewPortComponent::renderOpenGL()
         }
     }
 
-    // ── Apply queued sidebar block-info edit ──────────────────────────────────
+    // ── Apply queued sidebar block-info edit(s) ───────────────────────────────
     {
-        PendingSidebarEdit se;
+        std::vector<PendingSidebarEdit> sidebarBatch;
         {
             juce::ScopedLock lock(sidebarEditMutex_);
-            se = pendingSidebarEdit_;
-            pendingSidebarEdit_.active = false;
+            sidebarBatch.swap(pendingSidebarEdits_);
         }
-        if (se.active)
+
+        for (const auto& se : sidebarBatch)
         {
+        if (!se.active)
+            continue;
+
             for (auto& b : blockList)
             {
                 if (b.serial == se.serial)
@@ -619,6 +757,73 @@ void ViewPortComponent::renderOpenGL()
         }
     }
 
+    // ── Drain marquee (rubber-band) finalize ──────────────────────────────────
+    {
+        PendingMarqueeSelect mq;
+        {
+            juce::ScopedLock lk(marqueeSelectMutex_);
+            mq = pendingMarquee_;
+            pendingMarquee_.active = false;
+        }
+
+        if (mq.active)
+        {
+            const int   ew = getWidth(), eh = getHeight();
+            const float aspect = (eh > 0) ? (float) ew / eh : 1.f;
+            const Mat4  view   = camera.getViewMatrix();
+            const Mat4  proj   = camera.getProjectionMatrix(aspect);
+
+            const float minX = std::min(mq.x0, mq.x1);
+            const float maxX = std::max(mq.x0, mq.x1);
+            const float minY = std::min(mq.y0, mq.y1);
+            const float maxY = std::max(mq.y0, mq.y1);
+
+            auto inRect = [&](float px, float py)
+            {
+                return px >= minX && px <= maxX && py >= minY && py <= maxY;
+            };
+
+            std::vector<int> hitSerials;
+            hitSerials.reserve(blockList.size());
+
+            for (const auto& b : blockList)
+            {
+                const Vec3f center {
+                    b.pos.x + 0.5f, b.pos.y + 0.5f, b.pos.z + 0.5f
+                };
+                float sx = 0.f, sy = 0.f;
+                if (!Raycaster::worldToScreen(center, (float) ew, (float) eh,
+                                              view, proj, sx, sy))
+                    continue;
+                if (inRect(sx, sy))
+                    hitSerials.push_back(b.serial);
+            }
+
+            if (!mq.addToSelection)
+                multiSelection_.clear();
+
+            for (int s : hitSerials)
+                multiSelection_.insert(s);
+
+            if (!hitSerials.empty())
+            {
+                selectedSerial          = hitSerials.front();
+                highlightedBlockSerial_ = selectedSerial;
+                const int ser = selectedSerial;
+                juce::MessageManager::callAsync([this, ser]()
+                {
+                    if (onBlockSelected)
+                        onBlockSelected(ser);
+                });
+            }
+            else if (!mq.addToSelection)
+            {
+                selectedSerial          = -1;
+                highlightedBlockSerial_ = -1;
+            }
+        }
+    }
+
     // ── Drain edit-mode click (Fix 3: edit raycasts now happen on GL thread) ──
     //
     // All three edit-mode mouse cases (RMB open-popup, LMB select, Alt+LMB
@@ -689,28 +894,50 @@ void ViewPortComponent::renderOpenGL()
             }
             else if (ec.type == EditClickRequest::SelectLMB)
             {
+                int hitSerial = -1;
                 if (eHit.hit)
                 {
-                    for (auto& b : blockList)
+                    for (const auto& b : blockList)
                     {
                         if (b.pos == eHit.voxelPos)
                         {
-                            selectedSerial          = b.serial;
-                            highlightedBlockSerial_ = b.serial;
-                            dragStartPos            = b.pos;
-                            const int ser = b.serial;
-                            juce::MessageManager::callAsync([this, ser]()
-                            {
-                                if (onBlockSelected)
-                                    onBlockSelected(ser);
-                            });
+                            hitSerial    = b.serial;
+                            dragStartPos = b.pos;
                             break;
                         }
                     }
                 }
-                else
+
+                if (hitSerial >= 0)
                 {
-                    selectedSerial = -1;
+                    selectedSerial          = hitSerial;
+                    highlightedBlockSerial_ = hitSerial;
+
+                    if (ec.shift)
+                    {
+                        if (multiSelection_.count(hitSerial))
+                            multiSelection_.erase(hitSerial);
+                        else
+                            multiSelection_.insert(hitSerial);
+                    }
+                    else
+                    {
+                        multiSelection_.clear();
+                        multiSelection_.insert(hitSerial);
+                    }
+
+                    const int ser = hitSerial;
+                    juce::MessageManager::callAsync([this, ser]()
+                    {
+                        if (onBlockSelected)
+                            onBlockSelected(ser);
+                    });
+                }
+                else if (!ec.shift)
+                {
+                    selectedSerial          = -1;
+                    highlightedBlockSerial_ = -1;
+                    multiSelection_.clear();
                 }
             }
             else if (ec.type == EditClickRequest::AltRecordLMB)
@@ -1279,6 +1506,22 @@ void ViewPortComponent::renderOpenGL()
     }
     
     
+    // Cyan: every block in the multi-selection set (Ctrl+A or future
+    // click-drag bulk select).  Drawn before the orange "primary" pass
+    // so the primary still stands out for the block shown in the sidebar.
+    // Visible in both edit and normal mode so the user can confirm what
+    // Ctrl+A actually picked up.
+    if (!multiSelection_.empty())
+    {
+        for (const auto& b : blockList)
+        {
+            if (!isBlockShownLocal(b)) continue;
+            if (b.serial == selectedSerial) continue;
+            if (multiSelection_.count(b.serial))
+                renderer.renderHighlight(vp, b.pos, Vec3f{ 0.25f, 0.75f, 1.f });
+        }
+    }
+
     // Orange: currently selected block in edit mode
     if (editMode && selectedSerial >= 0)
     {
@@ -1291,7 +1534,9 @@ void ViewPortComponent::renderOpenGL()
     if (editMode)
     {
         for (const auto& b : blockList)
-            if (isBlockShownLocal(b) && b.serial != selectedSerial)
+            if (isBlockShownLocal(b)
+                && b.serial != selectedSerial
+                && multiSelection_.count(b.serial) == 0)
                 renderer.renderHighlight(vp, b.pos, Vec3f{ 0.6f, 0.5f, 0.1f });
     }
 
@@ -1522,6 +1767,14 @@ void ViewPortComponent::renderOpenGL()
     {
         juce::ScopedLock lock(blockListSnapshotMutex_);
         blockListSnapshot_ = blockList;
+    }
+
+    {
+        juce::ScopedLock lock(multiSelectionSnapshotMutex_);
+        multiSelectionSnapshot_.clear();
+        multiSelectionSnapshot_.reserve(multiSelection_.size());
+        for (int s : multiSelection_)
+            multiSelectionSnapshot_.push_back(s);
     }
 
     // ── Reset GL state for JUCE's 2D overlay compositor ──────────────────────
@@ -1854,6 +2107,8 @@ void ViewPortComponent::paint(juce::Graphics& g)
                  + "    RMB" + dot + "Look";
         else if (isEdit)
             hint = "LMB" + dot + "Select"
+                 + "    Drag" + dot + "Box Select"
+                 + "    Shift" + dot + "Add to Selection"
                  + "    RMB" + dot + "Edit Block"
                  + "    Alt+LMB" + dot + "Record Movement"
                  + "    Tab" + dot + "Exit Edit";
@@ -1962,6 +2217,32 @@ void ViewPortComponent::paint(juce::Graphics& g)
             g.setFont(juce::Font(11.f));
             g.setColour(cPrimary.withAlpha(0.8f));
             g.drawText(btnLabels[i], r, juce::Justification::centred, false);
+        }
+    }
+
+    // ── Marquee (rubber-band) overlay while drag-selecting in edit mode ─────
+    {
+        MarqueeDragState md;
+        {
+            juce::ScopedLock lk(marqueeDragMutex_);
+            md = marqueeDrag_;
+        }
+        if (md.active)
+        {
+            const float x0 = md.start.x;
+            const float y0 = md.start.y;
+            const float x1 = md.current.x;
+            const float y1 = md.current.y;
+            const float minX = std::min(x0, x1);
+            const float minY = std::min(y0, y1);
+            const float w = std::abs(x1 - x0);
+            const float h = std::abs(y1 - y0);
+
+            juce::Rectangle<float> box(minX, minY, w, h);
+            g.setColour(juce::Colour(0x3340a8ff));
+            g.fillRect(box);
+            g.setColour(juce::Colour(0xff40a8ff));
+            g.drawRect(box, 1.5f);
         }
     }
 }
@@ -2220,11 +2501,11 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
 
         if (editMode)
         {
-            // LMB in edit mode (no Alt): select a block.
-            // Queue GL-thread raycast — previously read camera/blockList on message thread.
-            juce::ScopedLock lock(editClickMutex_);
-            pendingEditClick_ = { EditClickRequest::SelectLMB,
-                                  e.position.x, e.position.y, true };
+            // Defer the raycast until mouseUp so a drag can become a rubber-band
+            // multi-select instead of an immediate single click.
+            juce::ScopedLock lk(marqueeDragMutex_);
+            marqueeDrag_ = { true, false, e.mods.isShiftDown(),
+                             e.position, e.position };
             return;  // never place a block in edit mode
         }
 
@@ -2240,6 +2521,37 @@ void ViewPortComponent::mouseDown(const juce::MouseEvent& e)
 
 void ViewPortComponent::mouseUp(const juce::MouseEvent& e)
 {
+    // ── Finalize marquee drag or deferred edit-mode click ─────────────────────
+    {
+        MarqueeDragState md;
+        {
+            juce::ScopedLock lk(marqueeDragMutex_);
+            md = marqueeDrag_;
+            marqueeDrag_ = {};
+        }
+
+        if (md.pending)
+        {
+            if (md.active)
+            {
+                juce::ScopedLock lk(marqueeSelectMutex_);
+                pendingMarquee_ = { true,
+                                    md.start.x, md.start.y,
+                                    md.current.x, md.current.y,
+                                    md.shiftAdds };
+            }
+            else
+            {
+                juce::ScopedLock lock(editClickMutex_);
+                pendingEditClick_ = { EditClickRequest::SelectLMB,
+                                      md.start.x, md.start.y,
+                                      true, md.shiftAdds };
+            }
+            repaint();
+            return;
+        }
+    }
+
     // ── End an active gizmo drag ──────────────────────────────────────────────
     if (gizmoActiveAxis_.load() >= 0)
     {
@@ -2356,6 +2668,31 @@ void ViewPortComponent::mouseDrag(const juce::MouseEvent& e)
             { juce::ScopedLock m(mouseMutex); mouse.curX = e.position.x; mouse.curY = e.position.y; }
             repaint();
             return;
+        }
+    }
+
+    // ── Rubber-band multi-select (edit mode) ──────────────────────────────────
+    if (editMode && !e.mods.isAltDown())
+    {
+        juce::ScopedLock lk(marqueeDragMutex_);
+        if (marqueeDrag_.pending || marqueeDrag_.active)
+        {
+            if (marqueeDrag_.pending && !marqueeDrag_.active)
+            {
+                const float dx = e.position.x - marqueeDrag_.start.x;
+                const float dy = e.position.y - marqueeDrag_.start.y;
+                if (dx * dx + dy * dy > 36.f)
+                    marqueeDrag_.active = true;
+            }
+            if (marqueeDrag_.active)
+            {
+                marqueeDrag_.current = e.position;
+                { juce::ScopedLock m(mouseMutex);
+                  mouse.curX = e.position.x;
+                  mouse.curY = e.position.y; }
+                repaint();
+                return;
+            }
         }
     }
 
@@ -2499,6 +2836,23 @@ void ViewPortComponent::mouseWheelMove(const juce::MouseEvent& e,
 
 bool ViewPortComponent::keyPressed(const juce::KeyPress& k)
 {
+    // Any Ctrl- / Cmd-combo is delegated to MainComponent (Save, Undo,
+    // Copy / Paste / Select All, …).  Returning false here lets the event
+    // bubble out of the focused viewport up to its parent, which is what
+    // MainComponent::keyPressed expects.
+    const auto mods = k.getModifiers();
+    if (mods.isCtrlDown() || mods.isCommandDown())
+        return false;
+
+    // Esc – clear the multi-selection (Ctrl+A leftovers).
+    // We don't deselect the *primary* selectedSerial here, so the sidebar
+    // Info panel keeps showing whatever the user was inspecting.
+    if (k.getKeyCode() == juce::KeyPress::escapeKey)
+    {
+        requestClearMultiSelection();
+        return true;
+    }
+
     // R – reset camera
     if (k.getKeyCode() == 'r' || k.getKeyCode() == 'R')
     {
@@ -2517,7 +2871,9 @@ bool ViewPortComponent::keyPressed(const juce::KeyPress& k)
         return true;
     }
 
-    // C – clear all voxels (with confirmation)
+    // C – clear all voxels (with confirmation).
+    // Modifier-free only: Ctrl+C is reserved for Copy (handled in
+    // MainComponent), so we MUST NOT treat it as Clear.
     if (k.getKeyCode() == 'c' || k.getKeyCode() == 'C')
     {
         if (blockList.empty())
@@ -2544,11 +2900,16 @@ bool ViewPortComponent::keyPressed(const juce::KeyPress& k)
     {
         editMode = !editMode;
         selectedSerial = -1;
+        {
+            juce::ScopedLock lk(marqueeDragMutex_);
+            marqueeDrag_ = {};
+        }
+        requestClearMultiSelection();
         juce::MessageManager::callAsync([this]() { repaint(); });
         return true;
     }
 
-    if (k.getModifiers().isAltDown())
+    if (mods.isAltDown())
     {
         // Only set the flag; actual recording starts on Alt+LMB mouseDown
         // so we know which block the user clicked on before starting.
@@ -2566,6 +2927,45 @@ void ViewPortComponent::updateBlockTiming(int serial,int timeIndex,double start,
     // Queue for the GL thread — safe to call from the message thread.
     juce::ScopedLock lock(timingMutex_);
     pendingTimingUpdate_ = { serial, start, duration, true, timeIndex};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clipboard / multi-selection API
+//
+// All four entry points run on the message thread (called from
+// MainComponent::keyPressed).  Each one only mutates a tiny pending-op
+// struct under a critical section — the actual work happens later on the
+// GL thread when renderOpenGL() drains pendingClipboardOp_.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void ViewPortComponent::requestCopySelection()
+{
+    juce::ScopedLock lk(clipboardOpMutex_);
+    pendingClipboardOp_.type = PendingClipboardOp::Copy;
+}
+
+void ViewPortComponent::requestPasteSelection()
+{
+    juce::ScopedLock lk(clipboardOpMutex_);
+    pendingClipboardOp_.type = PendingClipboardOp::Paste;
+}
+
+void ViewPortComponent::requestSelectAll()
+{
+    juce::ScopedLock lk(clipboardOpMutex_);
+    pendingClipboardOp_.type = PendingClipboardOp::SelectAll;
+}
+
+void ViewPortComponent::requestClearMultiSelection()
+{
+    juce::ScopedLock lk(clipboardOpMutex_);
+    pendingClipboardOp_.type = PendingClipboardOp::ClearMulti;
+}
+
+std::vector<int> ViewPortComponent::getMultiSelectionCopy() const
+{
+    juce::ScopedLock lock(multiSelectionSnapshotMutex_);
+    return multiSelectionSnapshot_;
 }
 
 void ViewPortComponent::focusGained(FocusChangeType) {}
@@ -2608,12 +3008,12 @@ void ViewPortComponent::applySidebarBlockInfo(
     // The GL thread drains pendingSidebarEdit_ in renderOpenGL() and does
     // the voxelGrid.move() + blockList mutation there.
     juce::ScopedLock lock(sidebarEditMutex_);
-    pendingSidebarEdit_ = {
+    pendingSidebarEdits_.push_back({
         serial, pos, start, duration, movementEnabled, true,
         playbackMode, movementDurationSec, movementYOffset,
         isMuted, isHidden, loopBufferSec,
         isLooping, loopDurationSec, std::move(muteWindows)
-    };
+    });
 }
 
 void ViewPortComponent::matchBlockDurationToSound(int serial)
@@ -2648,7 +3048,7 @@ void ViewPortComponent::matchBlockDurationToSound(int serial)
         const double newDur = std::max(natDur, movDur);
 
         juce::ScopedLock lk(sidebarEditMutex_);
-        pendingSidebarEdit_ = {
+        pendingSidebarEdits_.push_back({
             serial, b.pos, b.startTimeSec, newDur,
             b.movementEnabled, true,
             static_cast<uint8_t>(b.playbackMode),
@@ -2656,7 +3056,7 @@ void ViewPortComponent::matchBlockDurationToSound(int serial)
             b.movementYOffset,
             b.isMuted, b.isHidden, b.loopBufferSec,
             b.isLooping, b.loopDurationSec, b.muteWindows
-        };
+        });
         // Sidebar info will refresh on the next frame snapshot.
         return;
     }

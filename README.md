@@ -168,9 +168,24 @@ All four views look at the origin (0,0,0) from a distance with a slight downward
 | `LMB` | Place block at preview position |
 | `RMB click` (no drag) | Remove hovered block |
 | `Backspace` | Remove hovered block |
-| `C` | Clear all blocks |
+| `C` | Clear all blocks (modifier-free only — `Ctrl+C` is **Copy**) |
 | `Shift + LMB` | Place block in mid-air (shift plane) |
 | `Shift + Scroll` | Raise / lower the shift plane Y level |
+
+### Editor Shortcuts (work anywhere the viewport has focus)
+
+| Input | Action |
+|-------|--------|
+| `Ctrl + S` | Save the current scene |
+| `Ctrl + Z` | Undo the most recent block placement |
+| `Ctrl + C` | Copy the current selection (the primary block, plus anything added by `Ctrl + A`) to the clipboard |
+| `Ctrl + V` | Paste the clipboard back into the scene.  Each pasted block is offset along +X until it finds a free cell, and the freshly-pasted blocks become the new multi-selection so you can keep pasting (or bulk-edit them) without re-clicking |
+| `Ctrl + A` | Select every block in the scene (multi-select highlight is cyan) |
+| `Esc` | Drop the multi-selection (keeps the primary selection / sidebar Info panel intact) |
+| Edit mode: **drag** on empty space | Rubber-band box — every block whose centre falls inside the rectangle is selected |
+| Edit mode: **Shift + drag** | Add every block in the box to the current selection |
+| Edit mode: **Shift + click** | Toggle one block in/out of the selection |
+| **Apply** (with 2+ selected) | Bulk-applies mute, hide, loop, and mute-schedule fields to all selected blocks; position/timing stay per-block |
 
 ### Edit Mode & Transport
 
@@ -778,6 +793,61 @@ To fix the editor cosmetics only, add `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` to th
 See [`md files/SESSION_2026-05-23_REPORT.md`](md%20files/SESSION_2026-05-23_REPORT.md)
 for the full bug log + root causes.
 
+### Fixed after the 2026-05-24 session
+
+* **`Ctrl + C` accidentally cleared the entire scene** —
+  `ViewPortComponent::keyPressed()` matched the bare letter `'C'` and
+  treated it as Clear-All without ever inspecting the modifier flags,
+  so the standard copy shortcut was a destructive operation.  The
+  handler now requires *no* Ctrl / Cmd to fire, and `ViewPortComponent`
+  early-returns `false` for any Ctrl-/Cmd-combo so the event bubbles
+  cleanly up to `MainComponent` (where the real shortcut table lives).
+
+### Fixed after the 2026-05-24 session (continued)
+
+* **`= Block` loop-length button protruded past the sidebar** — the loop
+  row used `std::max(40, editorW - btnW - gap)`, which on the 220-px
+  sidebar forced a 40-px editor and shoved the 72-px button ~14 px past
+  the right margin.  The button is now right-aligned inside the editor
+  column (`btnX = getWidth() - margin - btnW`), the artificial 40-px
+  floor is gone, and the control uses flat colours + `ConnectedOnLeft`
+  so it reads as one row with the loop-length field.
+
+### Added after the 2026-05-24 session
+
+* **Rubber-band multi-select (edit mode)** — LMB drag draws a cyan
+  rectangle; on release every block whose voxel centre projects inside
+  the box joins `multiSelection_` (Shift+drag adds instead of replacing).
+  Shift+click toggles a single block.  Works with `Ctrl+C` / `Ctrl+V` /
+  `Ctrl+A` / `Esc`.  Sidebar **Apply** pushes mute, hide, loop, and
+  mute-schedule to every selected block when two or more are highlighted.
+
+* **Standard editor shortcuts: `Ctrl + C` / `Ctrl + V` / `Ctrl + A`
+  (+ `Esc`)** — implemented as a small clipboard + multi-selection set
+  on `ViewPortComponent`:
+  * `requestCopySelection()` deep-copies the primary selection plus
+    everything in the multi-selection set into an in-memory
+    `clipboardBlocks_` vector (movement keyframes, mute windows, loop
+    state, custom file path — everything).
+  * `requestPasteSelection()` re-emits the clipboard with fresh
+    serials, translating each entry by `(+1, 0, 0)` and sliding further
+    along +X until it finds a free, in-bounds cell.  Pasted blocks
+    become the new multi-selection so the next `Ctrl + V` chains
+    cleanly and the first pasted block is promoted to the sidebar Info
+    panel.
+  * `requestSelectAll()` populates `multiSelection_` with every serial
+    in the scene; the renderer paints them in cyan
+    (`Vec3f{ 0.25f, 0.75f, 1.f }`) so the user can visually confirm
+    what got picked up — alongside the existing orange "primary" pass
+    in edit mode.
+  * `Esc` calls `requestClearMultiSelection()` and drops the cyan
+    overlay without disturbing the primary selection / sidebar.
+  * All four entry points only mutate a tiny `pendingClipboardOp_`
+    under a critical section.  The actual `blockList` / `voxelGrid`
+    mutations happen on the GL thread inside `renderOpenGL()`, matching
+    the existing pattern used by `pendingOps`, `pendingSidebarEdit_`,
+    `pendingTimingUpdate_`, etc.
+
 ### Thread Safety (still open)
 
 | ID | Severity | Summary |
@@ -825,6 +895,13 @@ for the full bug log + root causes.
 * **Block-type change mid-movement** (e.g. violin → piano halfway)
 * **MP3 / AAC export** — extend `SceneAudioExporter::Format` (see the
   "How to extend" section of [`SESSION_2026-05-23_REPORT.md`](md%20files/SESSION_2026-05-23_REPORT.md))
-* **Fix the control+c and control+v option to add copy paste, work on control+a as well**
-* **UI change for Loop and Loop Gap button in block info page**
-* **Click-and-drag multi-select** for bulk mute / hide / assigning the same sound if same type / copying
+
+
+
+* ~~**Fix the control+c and control+v option to add copy paste, work on control+a as well**~~ — done 2026-05-24 (see *Fixed after the 2026-05-24 session* below)
+- Some adjustments are needed but they do work
+* ~~**UI change for Loop length button in block info page** (`= Block` protruding past the sidebar edge)~~ — done 2026-05-24
+* ~~**Click-and-drag multi-select** for bulk mute / hide / copying~~ — done 2026-05-24 (edit-mode rubber band + Shift modifiers; bulk Apply for mute/hide/loop; `Ctrl+C` on the set). *Assigning the same sound to all selected blocks of one type* still goes through the block edit popup per block for now.
+* **Im thinking also say when a block is invisible, like Violin 1 is visible till 5 seconds and then goes invisible, then maybe the user is able to place a block on the same position as the invisible block, however no two blocks can be visible within the same position, they can only be in the same position if one is visible and the other is not**
+* **Multiple sounds at different times** on the same block, so say violin 1 is placed, plays A note, then after 5 seconds or however long the user wants, then it plays a different note, and so on
+* **Position keyframes** as an alternative to recorded movement, this can make block movement more precise if needed and can make it easier and les annoying as some users suggested

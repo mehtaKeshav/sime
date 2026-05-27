@@ -23,6 +23,7 @@
 #include "AudioAnalysis.h"
 #include <atomic>
 #include <array>
+#include <unordered_set>
 #include <vector>
 
 class ViewPortComponent final
@@ -369,6 +370,33 @@ public:
     /// Safe on the message thread (read-only sample library access).
     AudioAnalysisResult analyzeBlockAudio(const BlockEntry& block) const;
 
+    // =========================================================================
+    // Clipboard / multi-selection API (called from MainComponent on the
+    // message thread, drained on the GL thread inside renderOpenGL).
+    // =========================================================================
+
+    /// Copy every currently-selected block (`selectedSerial` plus anything
+    /// in the multi-selection set) into the in-memory clipboard.  No-op
+    /// when there is no selection.
+    void requestCopySelection();
+
+    /// Paste the clipboard contents.  Each pasted block gets a fresh
+    /// serial; positions are translated by (+1, 0, 0) and pushed further
+    /// out if the target cell already holds a (visible) block.  No-op
+    /// when the clipboard is empty.
+    void requestPasteSelection();
+
+    /// Replace `selectedSerial` + `multiSelection_` with every block in
+    /// the current scene.  Used by Ctrl+A.
+    void requestSelectAll();
+
+    /// Drop the multi-selection set, keep `selectedSerial`.  Used by
+    /// Escape and by single-clicks on a block / empty space.
+    void requestClearMultiSelection();
+
+    /// Snapshot of `multiSelection_` refreshed each GL frame — safe on the
+    /// message thread (sidebar bulk Apply, status display, etc.).
+    std::vector<int> getMultiSelectionCopy() const;
 
 private:
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -582,6 +610,31 @@ private:
     int              selectedSerial = -1; ///< Serial of the block being edited
 
     // =========================================================================
+    // Multi-selection + clipboard  (GL-thread owned)
+    //
+    // `multiSelection_` holds every serial included in a bulk operation.
+    // `selectedSerial` is the *primary* — it's the one the sidebar Info
+    // panel shows.  Bulk ops (copy, future bulk mute/hide) read the
+    // union of the two.
+    //
+    // `clipboardBlocks_` stores deep copies (movement keyframes, mute
+    // windows, etc.) of whatever was on the multi-selection at the time
+    // of the last Copy.  Lives until the next Copy or until SIME exits.
+    // =========================================================================
+    std::unordered_set<int>  multiSelection_;
+    std::vector<BlockEntry>  clipboardBlocks_;
+
+    /// Pending clipboard / selection op queued from the message thread.
+    /// Drained at the top of every renderOpenGL() pass so blockList /
+    /// voxelGrid mutations stay on the GL thread.
+    struct PendingClipboardOp
+    {
+        enum Type { None, Copy, Paste, SelectAll, ClearMulti } type = None;
+    };
+    PendingClipboardOp     pendingClipboardOp_;
+    juce::CriticalSection  clipboardOpMutex_;
+
+    // =========================================================================
     // Pending sidebar block-info edit  (message → GL thread)
     // Replaces the old direct blockList mutation in applySidebarBlockInfo().
     // =========================================================================
@@ -610,8 +663,8 @@ private:
         // v9: scheduled mute windows (replaces single muteStartSec/muteEndSec)
         std::vector<MuteWindow> muteWindows;
     };
-    PendingSidebarEdit    pendingSidebarEdit_;
-    juce::CriticalSection sidebarEditMutex_;
+    std::vector<PendingSidebarEdit> pendingSidebarEdits_;
+    juce::CriticalSection           sidebarEditMutex_;
 
     // =========================================================================
     // Pending timing-only update  (message → GL thread)
@@ -658,9 +711,36 @@ private:
         enum Type { None, EditRMB, SelectLMB, AltRecordLMB } type = None;
         float x = 0.f, y = 0.f;
         bool  active = false;
+        bool  shift  = false;
     };
     EditClickRequest      pendingEditClick_;
     juce::CriticalSection editClickMutex_;
+
+    // =========================================================================
+    // Marquee (rubber-band) multi-select  (message thread drag, GL finalize)
+    // =========================================================================
+    struct MarqueeDragState
+    {
+        bool              pending = false;
+        bool              active  = false;
+        bool              shiftAdds = false;
+        juce::Point<float> start;
+        juce::Point<float> current;
+    };
+    MarqueeDragState      marqueeDrag_;
+    juce::CriticalSection marqueeDragMutex_;
+
+    struct PendingMarqueeSelect
+    {
+        bool  active = false;
+        float x0 = 0.f, y0 = 0.f, x1 = 0.f, y1 = 0.f;
+        bool  addToSelection = false;
+    };
+    PendingMarqueeSelect  pendingMarquee_;
+    juce::CriticalSection marqueeSelectMutex_;
+
+    mutable std::vector<int>  multiSelectionSnapshot_;
+    mutable juce::CriticalSection multiSelectionSnapshotMutex_;
 
     // =========================================================================
     // Pending recording stop  (message → GL thread)

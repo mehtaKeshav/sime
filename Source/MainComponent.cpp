@@ -5,6 +5,7 @@
 #include "MainComponent.h"
 #include "SceneFile.h"
 #include "ExportAudioDialog.h"
+#include <algorithm>
 // #include "MathUtils.h"
 // #include "BlockEntry.h"
 
@@ -175,11 +176,56 @@ MainComponent::MainComponent()
                                       bool isLooping, double loopDurationSec,
                                       std::vector<MuteWindow> muteWindows)
     {
-        view.applySidebarBlockInfo(serial, pos, start, duration, movementEnabled,
-                                   playbackMode, movementDurationSec, movementYOffset,
-                                   isMuted, isHidden, loopBufferSec,
-                                   isLooping, loopDurationSec,
-                                   muteWindows);
+        const auto multi = view.getMultiSelectionCopy();
+        const bool bulkApply = multi.size() > 1
+            && std::find(multi.begin(), multi.end(), serial) != multi.end();
+
+        if (!bulkApply)
+        {
+            view.applySidebarBlockInfo(serial, pos, start, duration, movementEnabled,
+                                       playbackMode, movementDurationSec, movementYOffset,
+                                       isMuted, isHidden, loopBufferSec,
+                                       isLooping, loopDurationSec,
+                                       muteWindows);
+        }
+        else
+        {
+            // Bulk: mute / hide / loop / mute-schedule go to every selected
+            // block; position and timing fields stay per-block (only the
+            // primary serial gets the values from the form).
+            const auto windowsForAll = muteWindows;
+            for (int s : multi)
+            {
+                Vec3i   applyPos = pos;
+                double  applyStart = start;
+                double  applyDur   = duration;
+                bool    applyMovEn = movementEnabled;
+                uint8_t applyMode  = playbackMode;
+                double  applyMovDur = movementDurationSec;
+                int     applyMovY   = movementYOffset;
+
+                if (s != serial)
+                {
+                    if (auto b = view.getBlockBySerial(s))
+                    {
+                        applyPos    = b->pos;
+                        applyStart  = b->startTimeSec;
+                        applyDur    = b->durationSec;
+                        applyMovEn  = b->movementEnabled;
+                        applyMode   = static_cast<uint8_t>(b->playbackMode);
+                        applyMovDur = b->movementDurationSec;
+                        applyMovY   = b->movementYOffset;
+                    }
+                }
+
+                view.applySidebarBlockInfo(s, applyPos, applyStart, applyDur,
+                                           applyMovEn, applyMode,
+                                           applyMovDur, applyMovY,
+                                           isMuted, isHidden, loopBufferSec,
+                                           isLooping, loopDurationSec,
+                                           windowsForAll);
+            }
+        }
 
         // Optimistic sidebar refresh — getBlockBySerial reads a snapshot that
         // may lag one frame behind the GL-thread apply, so merge form values
@@ -996,17 +1042,47 @@ void MainComponent::markDirty()
 
 bool MainComponent::keyPressed(const juce::KeyPress& k)
 {
-    if (k.getModifiers().isCtrlDown())
+    const auto mods = k.getModifiers();
+    if (mods.isCtrlDown() || mods.isCommandDown())
     {
-        if (k.getKeyCode() == 'S' || k.getKeyCode() == 's')
+        const int code = k.getKeyCode();
+
+        if (code == 'S' || code == 's')
         {
             saveScene();
             return true;
         }
 
-        if (k.getKeyCode() == 'Z' || k.getKeyCode() == 'z')
+        if (code == 'Z' || code == 'z')
         {
             view.requestUndo();
+            return true;
+        }
+
+        // Standard editor shortcuts:
+        //   Ctrl+C  → copy current selection (single block, or whatever
+        //             is in the Ctrl+A multi-selection set) to the
+        //             clipboard.
+        //   Ctrl+V  → paste the clipboard back into the scene.  Pasted
+        //             copies are offset along +X until they find a free
+        //             cell, and become the new multi-selection so the
+        //             user can immediately keep pasting / bulk-editing.
+        //   Ctrl+A  → select every block in the scene.
+        if (code == 'C' || code == 'c')
+        {
+            view.requestCopySelection();
+            return true;
+        }
+
+        if (code == 'V' || code == 'v')
+        {
+            view.requestPasteSelection();
+            return true;
+        }
+
+        if (code == 'A' || code == 'a')
+        {
+            view.requestSelectAll();
             return true;
         }
     }

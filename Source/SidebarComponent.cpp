@@ -85,6 +85,15 @@ SidebarComponent::SidebarComponent()
             onMatchDurationToSound(selectedBlock_->serial);
     };
 
+    // Flat, inset style so the control reads as part of the loop-length row
+    // rather than a raised chip that sticks past the sidebar edge.
+    matchLoopDurBtn_.setColour(juce::TextButton::buttonColourId,
+                               juce::Colour(0xff1e2436));
+    matchLoopDurBtn_.setColour(juce::TextButton::buttonOnColourId,
+                               juce::Colour(0xff28324a));
+    matchLoopDurBtn_.setColour(juce::TextButton::textColourOffId,
+                               juce::Colour(0xffb8c7e6));
+    matchLoopDurBtn_.setConnectedEdges(juce::Button::ConnectedOnLeft);
     matchLoopDurBtn_.setTooltip(
         "Set the loop length to match the block's full region duration "
         "(quick way to say \"loop fills the whole region\").");
@@ -433,13 +442,19 @@ void SidebarComponent::resized()
     placeRow(loopToggle_, y, margin, getWidth() - 2 * margin, 26);
     y += 30;
 
-    // Narrower button now that the label is just "= Block"; gives the loop
-    // duration editor a comfortable amount of width.
-    const int matchBtnW = 72;
-    const int loopEditorW = std::max(40, editorW - matchBtnW - 6);
+    // Loop-length row: editor + "= Block" share the same column as every
+    // other field.  The button is right-aligned inside that column so it
+    // never hangs past the sidebar margin (the old std::max(40, …) guard
+    // forced a 40-px minimum editor width and pushed a 72-px button 14 px
+    // past the edge on the 220-px sidebar).
+    constexpr int kLoopRowGap = 0;   // flush join — ConnectedOnLeft on the btn
+    const int matchBtnW = 64;
+    const int btnRight  = getWidth() - margin;
+    const int btnX      = btnRight - matchBtnW;
+    const int loopEditorW = juce::jmax(24, btnX - editorX - kLoopRowGap);
     placeRowPair(loopDurationEditor_, matchLoopDurBtn_, y,
-                 editorX,                   loopEditorW,
-                 editorX + loopEditorW + 6, matchBtnW,
+                 editorX, loopEditorW,
+                 btnX,    matchBtnW,
                  editorH);
     y += editorH + rowGap;
 

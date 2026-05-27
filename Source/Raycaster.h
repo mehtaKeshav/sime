@@ -50,6 +50,14 @@ public:
                              const Mat4& view,
                              const Mat4& proj);
 
+    /// Project a world-space point to screen pixels (top-left origin).
+    /// Returns false when the point is behind the camera.
+    static bool worldToScreen(Vec3f world,
+                              float screenW, float screenH,
+                              const Mat4& view,
+                              const Mat4& proj,
+                              float& outX, float& outY);
+
     // ── Placement helpers ─────────────────────────────────────────────────────
 
     /// Position directly adjacent to the hit face (for voxel placement).
