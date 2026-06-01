@@ -279,6 +279,16 @@ MainComponent::MainComponent()
         markDirty();
     };
 
+    sidebar.onApplyKeyframes = [this](int serial,
+                                      std::vector<MovementKeyFrame> frames)
+    {
+        view.applyMovementKeyframes(serial, std::move(frames));
+        // Sidebar refresh + transport rebuild happens via
+        // view.onBlockPropertiesChanged once the GL thread drains the edit.
+        transportBar.setBlocks(view.getBlockListCopy());
+        markDirty();
+    };
+
     view.onBlockPropertiesChanged = [this](int serial)
     {
         if (auto block = view.getBlockBySerial(serial))

@@ -1,6 +1,7 @@
 #include "SidebarComponent.h"
 #include "BlockEntry.h"
 #include "MuteSchedulePopup.h"
+#include "KeyframeEditorPopup.h"
 
 SidebarComponent::SidebarComponent()
 {
@@ -14,6 +15,7 @@ SidebarComponent::SidebarComponent()
     addAndMakeVisible(modeCombo_);
     addAndMakeVisible(movementDurationEditor_);
     addAndMakeVisible(pathYOffsetEditor_);
+    addAndMakeVisible(keyframesBtn_);
     addAndMakeVisible(loopToggle_);
     addAndMakeVisible(loopDurationEditor_);
     addAndMakeVisible(matchLoopDurBtn_);
@@ -83,6 +85,47 @@ SidebarComponent::SidebarComponent()
     {
         if (selectedBlock_ && onMatchDurationToSound)
             onMatchDurationToSound(selectedBlock_->serial);
+    };
+
+    keyframesBtn_.setColour(juce::TextButton::buttonColourId,
+                            juce::Colour(0xff242a3c));
+    keyframesBtn_.setColour(juce::TextButton::textColourOffId,
+                            juce::Colour(0xffe2e6f2));
+    keyframesBtn_.setTooltip(
+        "Open the keyframe editor to add or fine-tune the block's "
+        "position keyframes (alternative to Alt-drag recording).");
+    keyframesBtn_.onClick = [this]
+    {
+        if (!selectedBlock_) return;
+
+        if (!keyframeEditorPopup_)
+        {
+            keyframeEditorPopup_ = std::make_unique<KeyframeEditorPopup>();
+            keyframeEditorPopup_->onApply =
+                [this](int serial, std::vector<MovementKeyFrame> frames)
+            {
+                if (!selectedBlock_ || selectedBlock_->serial != serial)
+                    return;
+                keyframesDraft_ = frames;
+                if (onApplyKeyframes)
+                    onApplyKeyframes(serial, std::move(frames));
+            };
+            keyframeEditorPopup_->onDismiss = [] {};
+        }
+
+        const juce::String name = selectedDisplayName_.isNotEmpty()
+            ? selectedDisplayName_
+            : juce::String("Block ") + juce::String(selectedBlock_->serial);
+
+        keyframeEditorPopup_->setKeyframes(selectedBlock_->serial,
+                                           name,
+                                           selectedBlock_->pos,
+                                           keyframesDraft_);
+
+        const auto screenPos = keyframesBtn_.localPointToGlobal(
+            juce::Point<int>(keyframesBtn_.getWidth(),
+                             keyframesBtn_.getHeight() / 2));
+        keyframeEditorPopup_->showAt(screenPos);
     };
 
     // Flat, inset style so the control reads as part of the loop-length row
@@ -285,6 +328,7 @@ void SidebarComponent::resized()
         startEditor.setBounds(0, 0, 0, 0);
         durationEditor.setBounds(0, 0, 0, 0);
         movementEnabledToggle.setBounds(0, 0, 0, 0);
+        keyframesBtn_.setBounds(0, 0, 0, 0);
         modeCombo_.setBounds(0, 0, 0, 0);
         movementDurationEditor_.setBounds(0, 0, 0, 0);
         pathYOffsetEditor_.setBounds(0, 0, 0, 0);
@@ -316,6 +360,7 @@ void SidebarComponent::resized()
     startEditor.setBounds(0, 0, 0, 0);
     durationEditor.setBounds(0, 0, 0, 0);
     movementEnabledToggle.setBounds(0, 0, 0, 0);
+    keyframesBtn_.setBounds(0, 0, 0, 0);
     modeCombo_.setBounds(0, 0, 0, 0);
     movementDurationEditor_.setBounds(0, 0, 0, 0);
     pathYOffsetEditor_.setBounds(0, 0, 0, 0);
@@ -427,6 +472,9 @@ void SidebarComponent::resized()
 
     placeRow(movementEnabledToggle, y, margin, getWidth() - 2 * margin, 28);
     y += 32;
+
+    placeRow(keyframesBtn_, y, margin, getWidth() - 2 * margin, editorH);
+    y += editorH + rowGap;
 
     placeRow(modeCombo_, y, editorX, editorW, editorH);
     y += editorH + rowGap;
@@ -726,6 +774,9 @@ void SidebarComponent::paint(juce::Graphics& g)
         // Movement toggle row label is drawn by the toggle itself.
         y += 32;
 
+        // Keyframes button row — no left-hand label (button is full-width).
+        y += editorH + rowGap;
+
         g.drawText("Mode:",         margin, y, labelW, editorH, juce::Justification::centredLeft);
         y += editorH + rowGap;
 
@@ -913,6 +964,24 @@ void SidebarComponent::showBlockInfo(const BlockEntry& block,
         muteSchedulePopup_->setSchedule(block.serial, name, muteWindowsDraft_);
     }
 
+    // Position-keyframe draft: pull from the block so the popup edits
+    // whatever the engine currently plays back (including paths captured
+    // via Alt-drag).
+    keyframesDraft_ = block.recordedMovement;
+    const int kfCount = (int) keyframesDraft_.size();
+    keyframesBtn_.setButtonText(
+        kfCount > 0 ? ("Keyframes (" + juce::String(kfCount) + ")...")
+                    : juce::String("Keyframes..."));
+
+    if (keyframeEditorPopup_ && keyframeEditorPopup_->isVisible())
+    {
+        const juce::String name = selectedDisplayName_.isNotEmpty()
+            ? selectedDisplayName_
+            : juce::String("Block ") + juce::String(block.serial);
+        keyframeEditorPopup_->setKeyframes(block.serial, name, block.pos,
+                                           keyframesDraft_);
+    }
+
     const bool loopOn = block.isLooping
                      || block.playbackMode == BlockPlaybackMode::Loop;
     loopToggle_.setToggleState(loopOn, juce::dontSendNotification);
@@ -973,6 +1042,11 @@ void SidebarComponent::clearSelectedBlock()
     muteScheduleBtn_.setButtonText("Mute Schedule...");
     if (muteSchedulePopup_)
         muteSchedulePopup_->hide();
+
+    keyframesDraft_.clear();
+    keyframesBtn_.setButtonText("Keyframes...");
+    if (keyframeEditorPopup_)
+        keyframeEditorPopup_->hide();
     audioAnalysis_ = {};
     infoScrollY_ = 0;
 

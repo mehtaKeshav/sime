@@ -273,7 +273,7 @@ the fold.  Apply commits everything atomically.
 | **Identity** | Block type label + serial (e.g. `Violin 12`) |
 | **Position** | `X / Y / Z` editors |
 | **Timing** | `Start (s)` and `Duration (s)` editors |
-| **Movement** | `Enable Recorded Movement` toggle; `Mode` combo (Natural / Loop / Stretch / Speed); `Movement Duration` editor (0 = use region duration); `Path Y lift` integer offset |
+| **Movement** | `Enable Recorded Movement` toggle; **`Keyframes...`** button that opens the position-keyframe editor (manual `time / x / y / z` rows; alternative to Alt-drag recording, also useful for cleaning up a recorded path); `Mode` combo (Natural / Loop / Stretch / Speed); `Movement Duration` editor (0 = use region duration); `Path Y lift` integer offset |
 | **Loop** | `Loop sound` toggle; `Loop length (s)` editor + `Loop = Block Dur.` button (one-click match); `Loop gap (s)` editor (silence between repeats) |
 | **Mute / Hide** | `Mute (no audio, forever)` toggle; `Hide block in viewport` toggle; **`Mute Schedule...`** button that opens a floating editor where you can add any number of timed mute windows (start + duration, in seconds).  The button label shows the active window count, e.g. `Mute Schedule (3)...`. |
 | **One-click** | `Match Duration to Sound` — sets region duration to the loaded sample's natural length, preserving any recorded movement span |
@@ -387,6 +387,27 @@ Release the mouse button. The **● REC** indicator disappears and a confirmatio
 
 **Step 6 — Play it back**
 Press `E` to exit edit mode, then press **Play**. The block will travel through its recorded positions in sync with the transport clock.
+
+### Authoring keyframes by hand (alternative to Alt-drag)
+
+If the Alt-drag capture is too noisy — or if you just want surgical
+control over where the block is at a specific second — open the **Block
+Info panel**, hit the **`Keyframes...`** button in the MOVEMENT section,
+and edit the path as a flat table.
+
+| Field | Meaning |
+|-------|---------|
+| `Time (s)` | Seconds from the block's `Start`.  Sort order is enforced on Apply. |
+| `X / Y / Z` | Integer grid position at that moment. |
+| `+ Add Keyframe` | Appends a row prefilled with the last row's time + 0.5 s and position. |
+| `Clear All` | Removes every keyframe — equivalent to "no movement". |
+| `Apply` | Sorts by time, shifts so the first row sits at `t = 0`, and replaces the block's `recordedMovement`. |
+| `Cancel` | Closes the popup without touching the block. |
+
+Opening the popup on a block that **already** has a recorded path
+loads its keyframes for editing, so this is also the cleanup tool for
+wobbly Alt-drag captures.  Sub-2-keyframe lists clear the path (the
+engine needs at least two points to interpolate).
 
 ### Important Notes
 
@@ -813,6 +834,34 @@ for the full bug log + root causes.
   floor is gone, and the control uses flat colours + `ConnectedOnLeft`
   so it reads as one row with the loop-length field.
 
+### Added after the 2026-05-27 session
+
+* **Position-keyframe editor (alternative to Alt-drag recording)** —
+  new floating `KeyframeEditorPopup`, opened from the new **"Keyframes…"**
+  button at the top of the sidebar's MOVEMENT section.  Each row is a
+  manually-typed `(timeSec, x, y, z)` tuple; the popup writes directly
+  into the same `BlockEntry::recordedMovement` storage the engine
+  already plays back, so:
+  * Authoring a path by hand is identical to recording one — same
+    sequencer code path, same movement graph in the sidebar, same
+    transport scrub behaviour (`SequencerEngine::snapBlockPositionsToTime`
+    already understands integer keyframes).
+  * Loading the popup on a block that already has a recorded path lets
+    the user **clean up** wobbly Alt-drag captures — the exact use case
+    flagged by users as "annoying".
+  * Apply sorts by time, shifts so the first keyframe sits at `t = 0`,
+    and snaps `block.pos` (with a `voxelGrid.move`) to the first
+    keyframe so playback at `t = 0` doesn't look like a jump.  Collisions
+    against another block are detected and the move is rejected
+    silently so `voxelGrid` stays in sync.
+  * `hasRecordedMovement` is set iff there are at least 2 keyframes
+    (matching the engine's "needs a path" check).  A single keyframe or
+    an empty list clears the path.
+  * Plumbing follows the same pending-op pattern as every other
+    cross-thread edit in the codebase: a new `PendingKeyframeEdit`
+    queue drained inside `renderOpenGL()`, exposed to the message
+    thread as `ViewPortComponent::applyMovementKeyframes()`.
+
 ### Added after the 2026-05-24 session
 
 * **Rubber-band multi-select (edit mode)** — LMB drag draws a cyan
@@ -904,4 +953,4 @@ for the full bug log + root causes.
 * ~~**Click-and-drag multi-select** for bulk mute / hide / copying~~ — done 2026-05-24 (edit-mode rubber band + Shift modifiers; bulk Apply for mute/hide/loop; `Ctrl+C` on the set). *Assigning the same sound to all selected blocks of one type* still goes through the block edit popup per block for now.
 * **Im thinking also say when a block is invisible, like Violin 1 is visible till 5 seconds and then goes invisible, then maybe the user is able to place a block on the same position as the invisible block, however no two blocks can be visible within the same position, they can only be in the same position if one is visible and the other is not**
 * **Multiple sounds at different times** on the same block, so say violin 1 is placed, plays A note, then after 5 seconds or however long the user wants, then it plays a different note, and so on
-* **Position keyframes** as an alternative to recorded movement, this can make block movement more precise if needed and can make it easier and les annoying as some users suggested
+* ~~**Position keyframes** as an alternative to recorded movement~~ — done 2026-05-27 (see *Added after the 2026-05-27 session* below)

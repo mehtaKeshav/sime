@@ -398,6 +398,13 @@ public:
     /// message thread (sidebar bulk Apply, status display, etc.).
     std::vector<int> getMultiSelectionCopy() const;
 
+    /// Replace @p serial's recorded movement path with @p frames.  Sorted,
+    /// time-normalized (first keyframe at t=0), and snapped to integer
+    /// grid coordinates on the GL thread.  Used by the Keyframe Editor
+    /// popup as an alternative to Alt-drag recording.
+    void applyMovementKeyframes(int serial,
+                                std::vector<MovementKeyFrame> frames);
+
 private:
     // ── Private helpers ───────────────────────────────────────────────────────
     void processKeyboardMovement(float dt);
@@ -665,6 +672,22 @@ private:
     };
     std::vector<PendingSidebarEdit> pendingSidebarEdits_;
     juce::CriticalSection           sidebarEditMutex_;
+
+    // =========================================================================
+    // Pending position-keyframe edit  (message → GL thread)
+    //
+    // The Keyframe Editor popup runs on the message thread; the actual
+    // BlockEntry / voxelGrid mutation has to happen on the GL thread so
+    // we queue here and drain inside renderOpenGL().
+    // =========================================================================
+    struct PendingKeyframeEdit
+    {
+        int                            serial = -1;
+        bool                           active = false;
+        std::vector<MovementKeyFrame>  frames;
+    };
+    std::vector<PendingKeyframeEdit> pendingKeyframeEdits_;
+    juce::CriticalSection            keyframeEditMutex_;
 
     // =========================================================================
     // Pending timing-only update  (message → GL thread)
