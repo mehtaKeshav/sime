@@ -392,6 +392,41 @@ void AudioEngine::dispatchEvent(const SequencerEvent& ev)
         handleStopEvent(ev);
     else if (ev.type == SequencerEventType::Movement)
     {
+        for (auto& voice : activeVoices_)
+        {
+            if (voice.blockSerial == ev.blockSerial && !voice.isFinished())
+            {
+                applySpatialPosition(voice,
+                                    ev.blockX,
+                                    ev.blockY,
+                                    ev.blockZ);
+
+                voice.posX = ev.blockX;
+                voice.posY = ev.blockY;
+                voice.posZ = ev.blockZ;
+
+                if (ev.hasVelocity)
+                {
+                    voice.velX = ev.velocityX;
+                    voice.velY = ev.velocityY;
+                    voice.velZ = ev.velocityZ;
+                }
+
+                voice.dopplerRate = computeDopplerRate(
+                    voice.posX, voice.posY, voice.posZ,
+                    voice.velX, voice.velY, voice.velZ
+                );
+
+                DBG("Updated spatial audio for block "
+                    << ev.blockSerial
+                    << " pos=(" << ev.blockX << ", "
+                    << ev.blockY << ", "
+                    << ev.blockZ << ")"
+                    << ", doppler=" << voice.dopplerRate);
+            }
+        }
+    }
+    {
         // Update spatial position of playing voice
         for (auto& voice : activeVoices_)
         {
