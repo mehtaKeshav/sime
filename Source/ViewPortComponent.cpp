@@ -679,6 +679,82 @@ void ViewPortComponent::renderOpenGL()
         }
     }
 
+    // ── Apply queued position-keyframe edit(s) ────────────────────────────────
+    //
+    // Drained after sidebar edits so a back-to-back Apply (sidebar) → Apply
+    // (keyframe popup) sees the latest pos / duration on this same frame.
+    {
+        std::vector<PendingKeyframeEdit> kfBatch;
+        {
+            juce::ScopedLock lock(keyframeEditMutex_);
+            kfBatch.swap(pendingKeyframeEdits_);
+        }
+
+        for (auto& edit : kfBatch)
+        {
+            if (!edit.active) continue;
+
+            for (auto& b : blockList)
+            {
+                if (b.serial != edit.serial) continue;
+
+                // Sanitize: drop entries with non-finite time, sort by time,
+                // shift so first keyframe sits at t = 0.  The popup already
+                // does this on Apply, but defending here keeps the engine
+                // safe from any future caller that forgets.
+                std::vector<MovementKeyFrame> kfs;
+                kfs.reserve(edit.frames.size());
+                for (const auto& f : edit.frames)
+                {
+                    if (std::isfinite(f.timeSec))
+                        kfs.push_back({ std::max(0.0, f.timeSec), f.position });
+                }
+                std::sort(kfs.begin(), kfs.end(),
+                          [](const MovementKeyFrame& a, const MovementKeyFrame& b)
+                          { return a.timeSec < b.timeSec; });
+                if (!kfs.empty() && kfs.front().timeSec > 0.0)
+                {
+                    const double off = kfs.front().timeSec;
+                    for (auto& k : kfs) k.timeSec -= off;
+                }
+
+                // The first keyframe becomes the block's anchor position so
+                // playback / scrub at t = 0 doesn't look like a jump.  If
+                // the target cell is occupied by a *different* block, keep
+                // the existing pos so we never knock voxelGrid out of sync.
+                if (kfs.size() >= 1 && kfs.front().position != b.pos)
+                {
+                    const Vec3i target = kfs.front().position;
+                    bool collide = false;
+                    for (const auto& other : blockList)
+                        if (other.serial != b.serial && other.pos == target)
+                            { collide = true; break; }
+                    if (!collide && voxelGrid.move(b.pos, target))
+                    {
+                        b.pos = target;
+                        renderer.meshDirty = true;
+                    }
+                }
+
+                b.recordedMovement    = std::move(kfs);
+                b.hasRecordedMovement = b.recordedMovement.size() >= 2;
+                if (b.hasRecordedMovement)
+                    b.movementEnabled = true;
+                else
+                    b.movementEnabled = false;
+                b.resetPlaybackState();
+
+                const int editedSerial = edit.serial;
+                juce::MessageManager::callAsync([this, editedSerial]()
+                {
+                    if (onBlockPropertiesChanged)
+                        onBlockPropertiesChanged(editedSerial);
+                });
+                break;
+            }
+        }
+    }
+
     // ── Apply queued timing-only update (from timeline drag) ──────────────────
     {
         PendingTimingUpdate tu;
@@ -2966,6 +3042,13 @@ std::vector<int> ViewPortComponent::getMultiSelectionCopy() const
 {
     juce::ScopedLock lock(multiSelectionSnapshotMutex_);
     return multiSelectionSnapshot_;
+}
+
+void ViewPortComponent::applyMovementKeyframes(int serial,
+                                               std::vector<MovementKeyFrame> frames)
+{
+    juce::ScopedLock lk(keyframeEditMutex_);
+    pendingKeyframeEdits_.push_back({ serial, true, std::move(frames) });
 }
 
 void ViewPortComponent::focusGained(FocusChangeType) {}

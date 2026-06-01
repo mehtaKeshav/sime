@@ -9,6 +9,7 @@
 #include <memory>
 
 class MuteSchedulePopup;
+class KeyframeEditorPopup;
 
 class SidebarComponent : public juce::Component
 {
@@ -85,6 +86,12 @@ public:
     /// Receives the serial of the currently shown block; ViewPortComponent
     /// resolves the sample length and updates the region duration.
     std::function<void(int serial)> onMatchDurationToSound;
+
+    /// Fired when the user clicks Apply inside the Keyframe Editor popup.
+    /// The vector replaces the block's `recordedMovement`; an empty / single
+    /// entry vector clears the path (engine treats <2 frames as no motion).
+    std::function<void(int serial, std::vector<MovementKeyFrame> frames)>
+        onApplyKeyframes;
     
 private:
     bool collapsed = false;
@@ -119,6 +126,19 @@ private:
     juce::TextEditor durationEditor;
 
     juce::ToggleButton movementEnabledToggle { "Enable Recorded Movement" };
+
+    // Opens the floating Keyframe Editor so the user can author / edit
+    // position keyframes directly (alternative to Alt-drag recording).
+    juce::TextButton keyframesBtn_ { "Keyframes..." };
+
+    /// Working copy of the position keyframes for the block currently shown
+    /// in the Info panel.  Edited by KeyframeEditorPopup and pushed via
+    /// onApplyKeyframes when the user clicks Apply inside the popup.
+    std::vector<MovementKeyFrame> keyframesDraft_;
+
+    /// Lazily-created popup so we don't pay the cost for users who never
+    /// open the Info panel.
+    std::unique_ptr<KeyframeEditorPopup> keyframeEditorPopup_;
 
     // Phase 1 movement controls
     juce::ComboBox    modeCombo_;                            ///< Playback mode

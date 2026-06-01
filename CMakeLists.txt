@@ -29,6 +29,7 @@ target_sources(SIME PRIVATE
     Source/TransportClock.cpp
     Source/Blockeditpopup.cpp
     Source/MuteSchedulePopup.cpp
+    Source/KeyframeEditorPopup.cpp
     Source/TransportBarComponent.cpp
     Source/SceneFile.cpp
     Source/SceneAudioExporter.cpp
