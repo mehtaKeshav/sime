@@ -79,8 +79,11 @@ private:
 
     /// Open the speed popup menu anchored under the button.
     void showSpeedMenu();
-    juce::Label timeLabel;
+    juce::TextEditor   timeInput_;
     TimelineComponent timeline;
+    static double parseTypedTimeString(const juce::String& s);
+    void commitTypedTime();
+    void syncTimeDisplay();
     juce::Rectangle<int> miniProgressBounds_;
 
 

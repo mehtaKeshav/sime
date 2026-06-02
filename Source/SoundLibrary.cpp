@@ -184,3 +184,33 @@ int SoundLibrary::entryForSoundId(int soundId) const
     auto it = byId_.find(soundId);
     return (it != byId_.end()) ? it->second : -1;
 }
+
+int SoundLibrary::defaultSoundForBlockType(BlockType t, AudioEngine& engine)
+{
+    if (t == BlockType::Custom)
+        return -1;
+
+    const auto& indices = indicesFor(t);
+    if (!indices.empty())
+    {
+        int pick = indices[0];
+        for (int idx : indices)
+        {
+            const auto& e = entries_[idx];
+            if (e.note.containsIgnoreCase("A4")
+                || e.note.containsIgnoreCase("A3")
+                || e.note.containsIgnoreCase("C4")
+                || e.note.containsIgnoreCase("G3"))
+            {
+                pick = idx;
+                break;
+            }
+        }
+
+        const int sid = ensureLoaded(pick, engine);
+        if (sid >= 0)
+            return sid;
+    }
+
+    return blockTypeDefaultSoundId(t);
+}

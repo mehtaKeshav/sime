@@ -115,10 +115,14 @@ inline int blockTypeDefaultSoundId(BlockType t)
 {
     switch (t)
     {
-        case BlockType::Violin: return 100;     // synth violin (legacy fallback)
-        case BlockType::Piano:  return 200;     // synth piano
-        case BlockType::Drum:   return 300;     // synth drum kick
-        default:                return -1;
+        case BlockType::Violin:        return 100;
+        case BlockType::Piano:         return 200;
+        case BlockType::Drum:          return 300;
+        case BlockType::Percussion:    return 301;   // snare synth
+        case BlockType::Custom:        return -1;
+        // When the CSV library is unavailable, every orchestral type
+        // falls back to the violin synth so placement is never silent.
+        default:                       return 100;
     }
 }
 

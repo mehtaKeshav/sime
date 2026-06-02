@@ -144,10 +144,60 @@ KeyframeEditorPopup::KeyframeEditorPopup()
     };
     addAndMakeVisible(cancelButton_);
 
+    // Time-snap selector — rounds keyframe times to a multiple of the chosen
+    // interval.  Off by default to avoid surprising existing scenes; pick
+    // 1 s for a "show every second" view that's much easier to read.
+    snapLabel_.setText("Snap times:", juce::dontSendNotification);
+    snapLabel_.setFont(juce::Font(11.f, juce::Font::bold));
+    snapLabel_.setColour(juce::Label::textColourId, juce::Colour(0xff8b94ad));
+    snapLabel_.setJustificationType(juce::Justification::centredRight);
+    addAndMakeVisible(snapLabel_);
+
+    snapBox_.addItem("Off (exact)", 1);
+    snapBox_.addItem("0.5 s",       2);
+    snapBox_.addItem("1 s",         3);
+    snapBox_.addItem("2 s",         4);
+    snapBox_.addItem("5 s",         5);
+    snapBox_.setSelectedId(1, juce::dontSendNotification);
+    snapBox_.setColour(juce::ComboBox::backgroundColourId, juce::Colour(kFieldBgColor));
+    snapBox_.setColour(juce::ComboBox::textColourId,       juce::Colour(0xfff0f2fa));
+    snapBox_.setColour(juce::ComboBox::outlineColourId,    juce::Colour(kFieldBdColor));
+    snapBox_.setColour(juce::ComboBox::arrowColourId,      juce::Colour(0xff8b94ad));
+    snapBox_.setTooltip("Round every keyframe's time to a multiple of this interval.  "
+                        "Off keeps the exact original times.");
+    snapBox_.onChange = [this]
+    {
+        pullValuesFromRows();
+        applySnapToDraft();
+        rebuildRows();
+        resized();
+        repaint();
+    };
+    addAndMakeVisible(snapBox_);
+
     addToDesktop(juce::ComponentPeer::windowIsTemporary
                | juce::ComponentPeer::windowHasDropShadow);
 
     setVisible(false);
+}
+
+void KeyframeEditorPopup::applySnapToDraft()
+{
+    const double grid = [this]
+    {
+        switch (snapBox_.getSelectedId())
+        {
+            case 2: return 0.5;
+            case 3: return 1.0;
+            case 4: return 2.0;
+            case 5: return 5.0;
+            default: return 0.0;   // Off
+        }
+    }();
+    if (grid <= 0.0) return;
+
+    for (auto& k : draft_)
+        k.timeSec = std::round(k.timeSec / grid) * grid;
 }
 
 KeyframeEditorPopup::~KeyframeEditorPopup()
@@ -369,14 +419,24 @@ void KeyframeEditorPopup::resized()
     const int footerTop = kHeight - kFooterH + 6;
     hintLabel_.setBounds(kPad, footerTop, kWidth - 2 * kPad, 32);
 
-    const int rowY    = footerTop + 36;
+    // Row 0: Snap-times selector (right-aligned, label + combo).
+    const int snapH   = 24;
+    const int snapW   = 120;
+    const int snapLbW = 90;
+    const int snapY   = footerTop + 36;
+    snapLabel_.setBounds(kWidth - kPad - snapW - snapLbW - 4, snapY, snapLbW, snapH);
+    snapBox_  .setBounds(kWidth - kPad - snapW,                snapY, snapW,  snapH);
+
+    // Row 1: Add Keyframe / Clear All
+    const int rowY    = snapY + snapH + 6;
     const int actionH = 26;
     const int halfW   = (kWidth - 2 * kPad - 8) / 2;
-    addButton_  .setBounds(kPad,            rowY, halfW, actionH);
+    addButton_  .setBounds(kPad,             rowY, halfW, actionH);
     clearButton_.setBounds(kPad + halfW + 8, rowY, halfW, actionH);
 
+    // Row 2: Cancel / Apply
     const int btnY = rowY + actionH + 6;
-    cancelButton_.setBounds(kPad,            btnY, halfW, actionH);
+    cancelButton_.setBounds(kPad,             btnY, halfW, actionH);
     applyButton_ .setBounds(kPad + halfW + 8, btnY, halfW, actionH);
 
     layoutRows();

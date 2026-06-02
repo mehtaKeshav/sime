@@ -8,7 +8,7 @@ TransportBarComponent::TransportBarComponent()
     addAndMakeVisible(playPauseButton);
     addAndMakeVisible(stopButton);
     addAndMakeVisible(speedButton_);
-    addAndMakeVisible(timeLabel);
+    addAndMakeVisible(timeInput_);
     addAndMakeVisible(timeline);
     addAndMakeVisible(collapseButton);
 
@@ -54,10 +54,21 @@ TransportBarComponent::TransportBarComponent()
 
     speedButton_.onClick = [this] { showSpeedMenu(); };
 
-    // ── Time label ────────────────────────────────────────────────────────────
-    timeLabel.setFont(juce::Font(14.0f, juce::Font::bold));
-    timeLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-    timeLabel.setJustificationType(juce::Justification::centred);
+    // ── Time input ────────────────────────────────────────────────────────────
+    // Doubles as a readout (when unfocused) and a "jump to" input (when focused).
+    // Accepts plain seconds ("10"), M:SS ("1:23") or H:MM:SS.
+    timeInput_.setFont(juce::Font(14.0f, juce::Font::bold));
+    timeInput_.setColour(juce::TextEditor::backgroundColourId,      juce::Colour(0xff1a1c28));
+    timeInput_.setColour(juce::TextEditor::outlineColourId,         juce::Colour(0xff353952));
+    timeInput_.setColour(juce::TextEditor::focusedOutlineColourId,  juce::Colour(0xff3f6fff));
+    timeInput_.setColour(juce::TextEditor::textColourId,            juce::Colours::white);
+    timeInput_.setJustification(juce::Justification::centred);
+    timeInput_.setTooltip("Click to type a time (e.g. 10 or 1:23) and press Enter to jump.");
+    timeInput_.setSelectAllWhenFocused(true);
+
+    timeInput_.onReturnKey  = [this] { commitTypedTime(); };
+    timeInput_.onFocusLost  = [this] { commitTypedTime(); };
+    timeInput_.onEscapeKey  = [this] { syncTimeDisplay(); };
 
     // ── Timeline callbacks ────────────────────────────────────────────────────
     timeline.onBlockEdited = [this](int serial, int timeIndex, double start, double duration)
@@ -207,13 +218,7 @@ void TransportBarComponent::setTransportState(bool playing, bool paused,
     currentTime_   = currentTimeSec;
     totalDuration_ = totalDurationSec;
 
-    int curMin = (int)(currentTime_ / 60.0);
-    int curSec = (int)std::fmod(currentTime_, 60.0);
-    int totMin = (int)(totalDuration_ / 60.0);
-    int totSec = (int)std::fmod(totalDuration_, 60.0);
-    juce::String timeText = juce::String::formatted("%d:%02d / %d:%02d", 
-                                                    curMin, curSec, totMin, totSec);
-    timeLabel.setText(timeText, juce::dontSendNotification);
+    syncTimeDisplay();
     timeline.setCurrentTime(currentTime_);
 
 
@@ -310,7 +315,7 @@ void TransportBarComponent::resized()
     // 70 px gives "0.75x" comfortable headroom; cycling-only versions were 55.
     speedButton_.setBounds(controlStrip.removeFromLeft(70).reduced(6, 5));
 
-    timeLabel.setBounds(controlStrip.removeFromLeft(170).reduced(6, 5));
+    timeInput_.setBounds(controlStrip.removeFromLeft(170).reduced(6, 5));
 
     // Reserve collapse button area FIRST
     auto rightButtonArea = controlStrip.removeFromRight(45);
@@ -347,6 +352,72 @@ void TransportBarComponent::resized()
 void TransportBarComponent::setBlocks(const std::vector<BlockEntry>& blocks)
 {
     timeline.setBlocks(blocks);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typed-time input (jump-to)
+// ─────────────────────────────────────────────────────────────────────────────
+
+double TransportBarComponent::parseTypedTimeString(const juce::String& raw)
+{
+    auto s = raw.trim();
+    if (s.isEmpty()) return -1.0;
+
+    // Allow trailing "/ MM:SS" so the user can edit in-place over the readout.
+    const int slashIdx = s.indexOfChar('/');
+    if (slashIdx > 0)
+        s = s.substring(0, slashIdx).trim();
+
+    if (s.containsChar(':'))
+    {
+        auto parts = juce::StringArray::fromTokens(s, ":", "");
+        if (parts.size() == 2)
+            return parts[0].getDoubleValue() * 60.0 + parts[1].getDoubleValue();
+        if (parts.size() >= 3)
+            return parts[0].getDoubleValue() * 3600.0
+                 + parts[1].getDoubleValue() * 60.0
+                 + parts[2].getDoubleValue();
+        return -1.0;
+    }
+
+    return s.getDoubleValue();
+}
+
+void TransportBarComponent::commitTypedTime()
+{
+    const double t = parseTypedTimeString(timeInput_.getText());
+
+    if (t >= 0.0)
+    {
+        const double target = juce::jmax(0.0, t);
+        if (onPlayheadMoved)
+            onPlayheadMoved(target);
+        currentTime_ = target;
+    }
+
+    // Force-refresh + release focus so the next timer ticks paint the readout.
+    const int curMin = (int)(currentTime_ / 60.0);
+    const int curSec = (int)std::fmod(currentTime_, 60.0);
+    const int totMin = (int)(totalDuration_ / 60.0);
+    const int totSec = (int)std::fmod(totalDuration_, 60.0);
+    timeInput_.setText(juce::String::formatted("%d:%02d / %d:%02d",
+                                               curMin, curSec, totMin, totSec),
+                       juce::dontSendNotification);
+    juce::Component::unfocusAllComponents();
+}
+
+void TransportBarComponent::syncTimeDisplay()
+{
+    if (timeInput_.hasKeyboardFocus(true))
+        return;   // don't overwrite while the user is typing
+
+    const int curMin = (int)(currentTime_ / 60.0);
+    const int curSec = (int)std::fmod(currentTime_, 60.0);
+    const int totMin = (int)(totalDuration_ / 60.0);
+    const int totSec = (int)std::fmod(totalDuration_, 60.0);
+    timeInput_.setText(juce::String::formatted("%d:%02d / %d:%02d",
+                                               curMin, curSec, totMin, totSec),
+                       juce::dontSendNotification);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

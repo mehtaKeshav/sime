@@ -56,7 +56,10 @@ MainComponent::MainComponent()
     {
         auto block = view.getBlockBySerial(serial);
         if (block)
+        {
             sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
+            refreshSpatialSidebarReadout();
+        }
     };
 
     // Update the transport bar immediately when blocks are added / removed / loaded,
@@ -292,7 +295,10 @@ MainComponent::MainComponent()
     view.onBlockPropertiesChanged = [this](int serial)
     {
         if (auto block = view.getBlockBySerial(serial))
+        {
             sidebar.showBlockInfo(*block, view.displayNameForSerial(serial));
+            refreshSpatialSidebarReadout();
+        }
     };
 
     // ── Block type toolbar ────────────────────────────────────────────────────
@@ -341,23 +347,92 @@ MainComponent::MainComponent()
     muteMenuBtn_.setColour(juce::TextButton::textColourOnId,  juce::Colours::white);
     muteMenuBtn_.onClick = [this] { showMuteMenu(); };
 
-    // ── View toggles (planes + arrows) ────────────────────────────────────────
-    configureToggleButton(showFloorBtn_);
-    configureToggleButton(showWallXBtn_);
-    configureToggleButton(showWallZBtn_);
-    configureToggleButton(showArrowsBtn_);
-    configureToggleButton(dopplerBtn_);
-    showFloorBtn_  .setToggleState(view.getShowFloorPlane(), juce::dontSendNotification);
-    showWallXBtn_  .setToggleState(view.getShowWallXPlane(), juce::dontSendNotification);
-    showWallZBtn_  .setToggleState(view.getShowWallZPlane(), juce::dontSendNotification);
-    showArrowsBtn_ .setToggleState(view.getShowArrows(),     juce::dontSendNotification);
-    dopplerBtn_    .setToggleState(false,                    juce::dontSendNotification);
+    // ── View toggles (planes + arrows now live inside the Layers menu) ──────
+    addChildComponent(layersMenuBtn_);
+    layersMenuBtn_.setColour(juce::TextButton::buttonColourId,    juce::Colour(0xff252840));
+    layersMenuBtn_.setColour(juce::TextButton::buttonOnColourId,  juce::Colour(0xff3a3f60));
+    layersMenuBtn_.setColour(juce::TextButton::textColourOffId,   juce::Colour(0xffe2e6f2));
+    layersMenuBtn_.setColour(juce::TextButton::textColourOnId,    juce::Colours::white);
+    layersMenuBtn_.setTooltip("Show or hide the floor / walls / move arrows.");
+    layersMenuBtn_.onClick = [this] { showLayersMenu(); };
 
-    showFloorBtn_  .onClick = [this] { const bool v = !view.getShowFloorPlane(); view.setShowFloorPlane(v); showFloorBtn_ .setToggleState(v, juce::dontSendNotification); };
-    showWallXBtn_  .onClick = [this] { const bool v = !view.getShowWallXPlane(); view.setShowWallXPlane(v); showWallXBtn_ .setToggleState(v, juce::dontSendNotification); };
-    showWallZBtn_  .onClick = [this] { const bool v = !view.getShowWallZPlane(); view.setShowWallZPlane(v); showWallZBtn_ .setToggleState(v, juce::dontSendNotification); };
-    showArrowsBtn_ .onClick = [this] { const bool v = !view.getShowArrows();     view.setShowArrows(v);     showArrowsBtn_.setToggleState(v, juce::dontSendNotification); };
+    configureToggleButton(dopplerBtn_);
+    configureToggleButton(anchorBtn_);
+    configureToggleButton(freeCamBtn_);
+
+    addChildComponent(pathEditBtn_);
+    pathEditBtn_.setColour(juce::TextButton::buttonColourId,    juce::Colour(0xff252840));
+    pathEditBtn_.setColour(juce::TextButton::buttonOnColourId,  juce::Colour(0xff3a3f60));
+    pathEditBtn_.setColour(juce::TextButton::textColourOffId,   juce::Colour(0xffe2e6f2));
+    pathEditBtn_.setColour(juce::TextButton::textColourOnId,    juce::Colours::white);
+    pathEditBtn_.setTooltip("Open the camera-path editor (Hold / Lerp keyframes).");
+    pathEditBtn_.onClick = [this] { showCameraPathPopup(); };
+
+    addChildComponent(helpBtn_);
+    helpBtn_.setColour(juce::TextButton::buttonColourId,    juce::Colour(0xff252840));
+    helpBtn_.setColour(juce::TextButton::buttonOnColourId,  juce::Colour(0xff3a3f60));
+    helpBtn_.setColour(juce::TextButton::textColourOffId,   juce::Colour(0xffe2e6f2));
+    helpBtn_.setColour(juce::TextButton::textColourOnId,    juce::Colours::white);
+    helpBtn_.setTooltip("Show keyboard and mouse controls.");
+    helpBtn_.onClick = [this] { showHelpPopup(); };
+
+    addChildComponent(spatialSensSlider_);
+    spatialSensSlider_.setRange(0.25, 3.0, 0.05);
+    spatialSensSlider_.setValue(1.0, juce::dontSendNotification);
+    spatialSensSlider_.setSliderStyle(juce::Slider::LinearHorizontal);
+    spatialSensSlider_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 36, 22);
+    spatialSensSlider_.setTooltip("Spatial falloff sensitivity (higher = louder nearby, quieter far)");
+    spatialSensSlider_.onValueChange = [this]
+    {
+        view.setSpatialSensitivity((float) spatialSensSlider_.getValue());
+    };
+
+    dopplerBtn_    .setToggleState(false, juce::dontSendNotification);
+    anchorBtn_     .setToggleState(false, juce::dontSendNotification);
+    freeCamBtn_    .setToggleState(false, juce::dontSendNotification);
+    freeCamBtn_.setTooltip("Free Cam ON = user keeps manual control of the camera even when "
+                           "a path is loaded.  Free Cam OFF = camera auto-follows the path.");
+
     dopplerBtn_    .onClick = [this] { const bool v = !dopplerBtn_.getToggleState(); view.setDopplerEnabled(v); dopplerBtn_.setToggleState(v, juce::dontSendNotification); };
+    anchorBtn_     .onClick = [this]
+    {
+        const bool v = !anchorBtn_.getToggleState();
+        view.setAudioAnchorEnabled(v);
+        anchorBtn_.setToggleState(v, juce::dontSendNotification);
+    };
+    freeCamBtn_    .onClick = [this]
+    {
+        const bool v = !freeCamBtn_.getToggleState();
+        view.setFreeCameraOverride(v);
+        freeCamBtn_.setToggleState(v, juce::dontSendNotification);
+    };
+
+    // Camera-path always follows when a path is set unless Free Cam is on;
+    // recording always overrides following.  See ViewPortComponent.
+    view.setCameraPathFollowEnabled(true);
+
+    view.onDistanceMeasured = [this](int aSer, int bSer,
+                                     float dx, float dy, float dz,
+                                     float distM, float dbAtB)
+    {
+        juce::ignoreUnused(aSer);
+        const juce::String aName = view.displayNameForSerial(aSer);
+        const juce::String bName = view.displayNameForSerial(bSer);
+        sidebar.setBlockDistanceReadout(
+            aName + " -> " + bName + ": "
+            + juce::String(distM, 2) + " m"
+            + "  (d " + juce::String(dx, 1) + ", "
+            + juce::String(dy, 1) + ", " + juce::String(dz, 1) + ")"
+            + "   level @ B: " + juce::String(dbAtB, 1) + " dB");
+        sidebar.setDistancePickActive(false);
+        refreshSpatialSidebarReadout();
+    };
+
+    sidebar.onRequestDistancePick = [this](int serial)
+    {
+        view.beginDistancePick(serial);
+        sidebar.setDistancePickActive(true);
+    };
 
     // ── Wire edit popup ───────────────────────────────────────────────────────
     view.onRequestBlockEdit = [this](int serial, BlockType type,
@@ -462,11 +537,13 @@ void MainComponent::dismissStartupMenu()
     fileMenuBtn_.setVisible(true);
     viewMenuBtn_.setVisible(true);
     muteMenuBtn_.setVisible(true);
-    showFloorBtn_  .setVisible(true);
-    showWallXBtn_  .setVisible(true);
-    showWallZBtn_  .setVisible(true);
-    showArrowsBtn_ .setVisible(true);
+    layersMenuBtn_ .setVisible(true);
     dopplerBtn_    .setVisible(true);
+    anchorBtn_     .setVisible(true);
+    pathEditBtn_   .setVisible(true);
+    freeCamBtn_    .setVisible(true);
+    helpBtn_       .setVisible(true);
+    spatialSensSlider_.setVisible(true);
 
     resized();
 }
@@ -578,6 +655,24 @@ void MainComponent::timerCallback()
     );
 
     transportBar.setBlocks(view.getBlockListCopy());
+    refreshSpatialSidebarReadout();
+}
+
+void MainComponent::refreshSpatialSidebarReadout()
+{
+    if (auto block = sidebar.getSelectedBlockCopy())
+    {
+        const auto r = view.measureSpatialAt((float) block->pos.x,
+                                             (float) block->pos.y,
+                                             (float) block->pos.z);
+        sidebar.setListenerSpatialReadout(
+            "From listener: " + juce::String(r.distanceMetres, 2) + " m,  "
+            + juce::String(r.approxDb, 1) + " dB");
+    }
+    else
+    {
+        sidebar.setListenerSpatialReadout({});
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -640,6 +735,35 @@ void MainComponent::showMuteMenu()
             {
                 const auto t = static_cast<BlockType>(typeIdx);
                 view.setBlockTypeMuted(t, !view.isBlockTypeMuted(t));
+            }
+        });
+}
+
+void MainComponent::showLayersMenu()
+{
+    juce::PopupMenu m;
+    enum : int { kFloor = 1, kWallX, kWallZ, kArrows };
+
+    m.addItem(juce::PopupMenu::Item("Floor")
+                  .setID(kFloor).setTicked(view.getShowFloorPlane()));
+    m.addItem(juce::PopupMenu::Item("YZ Wall")
+                  .setID(kWallX).setTicked(view.getShowWallXPlane()));
+    m.addItem(juce::PopupMenu::Item("XY Wall")
+                  .setID(kWallZ).setTicked(view.getShowWallZPlane()));
+    m.addItem(juce::PopupMenu::Item("Move arrows")
+                  .setID(kArrows).setTicked(view.getShowArrows()));
+
+    m.showMenuAsync(
+        juce::PopupMenu::Options().withTargetComponent(&layersMenuBtn_),
+        [this](int result)
+        {
+            switch (result)
+            {
+                case kFloor:  view.setShowFloorPlane(!view.getShowFloorPlane()); break;
+                case kWallX:  view.setShowWallXPlane(!view.getShowWallXPlane()); break;
+                case kWallZ:  view.setShowWallZPlane(!view.getShowWallZPlane()); break;
+                case kArrows: view.setShowArrows    (!view.getShowArrows());     break;
+                default: break;
             }
         });
 }
@@ -740,9 +864,101 @@ void MainComponent::handleFileMenu(int result)
         showExportAudioDialog();
 }
 
+void MainComponent::showCameraPathPopup()
+{
+    if (!cameraPathPopup_)
+    {
+        cameraPathPopup_ = std::make_unique<CameraPathPopup>();
+        cameraPathPopup_->onApply = [this](std::vector<CameraKeyframe> path)
+        {
+            view.applyCameraPath(std::move(path));
+            markDirty();
+        };
+        cameraPathPopup_->onDismiss = [] {};
+        cameraPathPopup_->onCommitDraft = [this](std::vector<CameraKeyframe> path)
+        {
+            view.applyCameraPath(std::move(path));
+            markDirty();
+        };
+        cameraPathPopup_->onRecordToggle = [this]
+        {
+            view.toggleCameraPathRecording();
+        };
+        cameraPathPopup_->isRecording = [this]
+        {
+            return view.isCameraPathRecording();
+        };
+        cameraPathPopup_->fetchLivePath = [this]
+        {
+            return view.getCameraPathCopy();
+        };
+        cameraPathPopup_->getCurrentCamPose = [this]
+        {
+            return view.getCurrentCameraPose();
+        };
+        cameraPathPopup_->getCurrentPlayheadSec = [this]
+        {
+            return view.getTransportTime();
+        };
+        cameraPathPopup_->getCaptureIntervalSec = [this]
+        {
+            return view.getCameraRecordIntervalSec();
+        };
+        cameraPathPopup_->onCaptureIntervalChanged = [this](double s)
+        {
+            view.setCameraRecordIntervalSec(s);
+        };
+    }
+
+    cameraPathPopup_->setPath(view.getCameraPathCopy());
+
+    juce::Point<int> screenPos = pathEditBtn_.localPointToGlobal(
+        juce::Point<int>(pathEditBtn_.getWidth() / 2,
+                         pathEditBtn_.getHeight() + 6));
+    cameraPathPopup_->showAt(screenPos);
+}
+
+void MainComponent::showHelpPopup()
+{
+    auto* panel = new HelpPopup();
+
+    juce::DialogWindow::LaunchOptions opt;
+    opt.content.setOwned(panel);
+    opt.dialogTitle = "Help";
+    opt.dialogBackgroundColour = juce::Colour(0xff2a2a2a);
+    opt.escapeKeyTriggersCloseButton = true;
+    opt.useNativeTitleBar = false;
+    opt.resizable = false;
+
+    if (auto* w = opt.launchAsync())
+        w->centreWithSize(panel->getWidth() + 24, panel->getHeight() + 40);
+}
+
 void MainComponent::showExportAudioDialog()
 {
     auto* panel = new ExportAudioDialog();
+
+    {
+        const auto info = view.getExportListenerInfo();
+        const auto path = view.getCameraPathCopy();
+        if (!path.empty())
+        {
+            panel->setListenerPathInfo((int) path.size(),
+                                        path.front().timeSec,
+                                        path.back().timeSec);
+        }
+        else
+        {
+            const float yawDeg   = std::atan2(info.forward.x, info.forward.z)
+                                       * 180.0f / juce::MathConstants<float>::pi;
+            const float pitchDeg = std::asin(juce::jlimit(-1.0f, 1.0f, info.forward.y))
+                                       * 180.0f / juce::MathConstants<float>::pi;
+            panel->setListenerInfo(info.anchored,
+                                   info.pos.x, info.pos.y, info.pos.z,
+                                   yawDeg, pitchDeg);
+        }
+    }
+
     panel->onExportChosen = [this](SceneAudioExporter::Format fmt)
     {
         juce::MessageManager::callAsync([this, fmt]()
@@ -843,20 +1059,23 @@ void MainComponent::resized()
     blockTypeCombo.setBounds(tx, ty, 200, 26);
     tx += 200 + gap;
 
-    // ── View toggles laid out to the right of the block-type combo ────────────
-    // Allow extra width so the longer "YZ Wall" / "XY Wall" labels fit cleanly.
-    const int toggleW   = 64;
-    const int wallToggleW = 76;
-    showFloorBtn_  .setBounds(tx, ty, toggleW,     26); tx += toggleW     + gap;
-    showWallXBtn_  .setBounds(tx, ty, wallToggleW, 26); tx += wallToggleW + gap;
-    showWallZBtn_  .setBounds(tx, ty, wallToggleW, 26); tx += wallToggleW + gap;
-    showArrowsBtn_ .setBounds(tx, ty, toggleW,     26); tx += toggleW     + gap;
-    dopplerBtn_    .setBounds(tx, ty, toggleW,     26);
+    // ── Compact toolbar: Layers menu, audio pills, path/free-cam, slider.
+    const int toggleW = 64;
+    const int menuW   = 80;
+    const int freeW   = 78;
+    layersMenuBtn_ .setBounds(tx, ty, menuW,   26); tx += menuW   + gap;
+    dopplerBtn_    .setBounds(tx, ty, toggleW, 26); tx += toggleW + gap;
+    anchorBtn_     .setBounds(tx, ty, toggleW, 26); tx += toggleW + gap;
+    pathEditBtn_   .setBounds(tx, ty, toggleW, 26); tx += toggleW + gap;
+    freeCamBtn_    .setBounds(tx, ty, freeW,   26); tx += freeW   + gap;
+    spatialSensSlider_.setBounds(tx, ty, 110, 26);
 
     const int fbtnW = 72;
-    fileMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW,                 ty, fbtnW, 26);
-    viewMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW * 2 - 6,         ty, fbtnW, 26);
-    muteMenuBtn_.setBounds(toolbarArea.getRight() - 8 - fbtnW * 3 - 12,        ty, fbtnW, 26);
+    const int helpW = 56;
+    helpBtn_    .setBounds(toolbarArea.getRight() - 8 - helpW,                          ty, helpW, 26);
+    fileMenuBtn_.setBounds(toolbarArea.getRight() - 8 - helpW - 6 - fbtnW,              ty, fbtnW, 26);
+    viewMenuBtn_.setBounds(toolbarArea.getRight() - 8 - helpW - 6 - fbtnW * 2 - 6,      ty, fbtnW, 26);
+    muteMenuBtn_.setBounds(toolbarArea.getRight() - 8 - helpW - 6 - fbtnW * 3 - 12,     ty, fbtnW, 26);
 
     // Viewport gets remaining area above transport bar
     view.setBounds(area);
@@ -894,7 +1113,8 @@ void MainComponent::saveScene(const juce::String& explicitPath)
     if (target.isNotEmpty())
     {
         auto blocks = view.getBlockListCopy();
-        if (SceneFile::save(target.toStdString(), blocks))
+        auto camPath = view.getCameraPathCopy();
+        if (SceneFile::save(target.toStdString(), blocks, camPath))
         {
             currentFilePath_   = target;
             hasUnsavedChanges_ = false;
@@ -920,8 +1140,9 @@ void MainComponent::saveScene(const juce::String& explicitPath)
             if (!path.endsWithIgnoreCase(".sime"))
                 path += ".sime";
 
-            auto blocks = view.getBlockListCopy();
-            if (SceneFile::save(path.toStdString(), blocks))
+            auto blocks  = view.getBlockListCopy();
+            auto camPath = view.getCameraPathCopy();
+            if (SceneFile::save(path.toStdString(), blocks, camPath))
             {
                 currentFilePath_   = path;
                 hasUnsavedChanges_ = false;
@@ -946,12 +1167,14 @@ void MainComponent::openScene()
             if (result == juce::File{}) return;
 
             juce::String path = result.getFullPathName();
-            std::vector<BlockEntry> loaded;
-            if (SceneFile::load(path.toStdString(), loaded))
+            std::vector<BlockEntry>     loaded;
+            std::vector<CameraKeyframe> loadedCamPath;
+            if (SceneFile::load(path.toStdString(), loaded, loadedCamPath))
             {
                 suppressNextDirty_ = true;
                 hasUnsavedChanges_ = false;
                 view.loadScene(std::move(loaded));
+                view.applyCameraPath(std::move(loadedCamPath));
                 sidebar.clearSelectedBlock();   // drop stale info from the previous scene
                 currentFilePath_ = path;
                 updateWindowTitle();
@@ -973,20 +1196,23 @@ void MainComponent::autoSave()
                        .getChildFile("SIME");
     appData.createDirectory();
 
-    auto target = appData.getChildFile("autosave.sime");
-    auto blocks = view.getBlockListCopy();
-    if (!blocks.empty())
-        SceneFile::save(target.getFullPathName().toStdString(), blocks);
+    auto target  = appData.getChildFile("autosave.sime");
+    auto blocks  = view.getBlockListCopy();
+    auto camPath = view.getCameraPathCopy();
+    if (!blocks.empty() || !camPath.empty())
+        SceneFile::save(target.getFullPathName().toStdString(), blocks, camPath);
 }
 
 void MainComponent::loadSceneFromFile(const juce::String& path)
 {
-    std::vector<BlockEntry> loaded;
-    if (SceneFile::load(path.toStdString(), loaded))
+    std::vector<BlockEntry>     loaded;
+    std::vector<CameraKeyframe> loadedCamPath;
+    if (SceneFile::load(path.toStdString(), loaded, loadedCamPath))
     {
         suppressNextDirty_ = true;   // the upcoming load won't mark the scene dirty
         hasUnsavedChanges_ = false;
         view.loadScene(std::move(loaded));
+        view.applyCameraPath(std::move(loadedCamPath));
         sidebar.clearSelectedBlock();   // previous-scene selection is no longer valid
         currentFilePath_ = path;
         updateWindowTitle();
@@ -1053,6 +1279,21 @@ void MainComponent::markDirty()
 bool MainComponent::keyPressed(const juce::KeyPress& k)
 {
     const auto mods = k.getModifiers();
+
+    // Bare R — toggle camera-path recording.  Routed here (in addition to
+    // ViewPortComponent::keyPressed) so a focused popup / sidebar doesn't
+    // eat the shortcut: any descendant that doesn't consume R lets it
+    // bubble up to MainComponent.
+    if (!mods.isCtrlDown() && !mods.isCommandDown() && !mods.isAltDown())
+    {
+        const int code = k.getKeyCode();
+        if (code == 'R' || code == 'r')
+        {
+            view.toggleCameraPathRecording();
+            return true;
+        }
+    }
+
     if (mods.isCtrlDown() || mods.isCommandDown())
     {
         const int code = k.getKeyCode();

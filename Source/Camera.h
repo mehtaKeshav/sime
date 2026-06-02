@@ -41,6 +41,16 @@ public:
 
     void setPosition(const Vec3f& pos) { position = pos; }
 
+    /// Directly set yaw / pitch (radians).  Used when the camera path
+    /// system drives the camera from sampled keyframes — bypasses the
+    /// usual rotate() clamping so the path can re-create exactly the
+    /// pose the user recorded.
+    void setYawPitch(float newYaw, float newPitch)
+    {
+        yaw   = newYaw;
+        pitch = newPitch;
+    }
+
     /// Orient the camera toward a target point (sets yaw + pitch).
     void lookAtTarget(const Vec3f& target);
 

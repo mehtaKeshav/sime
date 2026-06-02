@@ -21,6 +21,7 @@
 #include "SceneAudioExporter.h"
 #include "SoundLibrary.h"
 #include "AudioAnalysis.h"
+#include "CameraPath.h"
 #include <atomic>
 #include <array>
 #include <unordered_set>
@@ -203,6 +204,102 @@ public:
     /// Doppler effect toggle — forwards to AudioEngine and the exporter.
     void setDopplerEnabled(bool v) { audioEngine.setDopplerEnabled(v); }
     bool getDopplerEnabled() const noexcept { return audioEngine.isDopplerEnabled(); }
+
+    void setSpatialSensitivity(float s) { audioEngine.setSpatialSensitivity(s); }
+    float getSpatialSensitivity() const noexcept { return audioEngine.getSpatialSensitivity(); }
+
+    /// Freeze the audio listener at the current camera pose.  Toggle off
+    /// restores the camera to that same pose.  Processed on the GL thread.
+    void setAudioAnchorEnabled(bool enabled);
+    bool isAudioAnchorActive() const noexcept { return audioAnchorActive_; }
+
+    AudioEngine::SpatialReadout measureSpatialAt(float x, float y, float z) const noexcept
+    {
+        return audioEngine.measureSourceAt(x, y, z);
+    }
+
+    /// Snapshot of the listener pose the exporter will use.  If the user has
+    /// hit Anchor, that frozen pose is returned; otherwise the live camera.
+    struct ExportListenerInfo
+    {
+        bool   anchored      = false;
+        Vec3f  pos;
+        Vec3f  forward;
+        Vec3f  right;
+        float  sensitivity   = 1.f;
+    };
+
+    ExportListenerInfo getExportListenerInfo() const;
+
+    // ── Camera (listener) path ─────────────────────────────────────────────
+    //
+    // A user-authored sequence of keyframes that drives the camera (and
+    // therefore the audio listener) during transport playback and during
+    // export.  Two keyframe modes: Hold (instant cut to the next pose) and
+    // Lerp (smooth interpolation).  See CameraPath.h for details.
+    //
+    // The popup edits a working draft on the message thread; calling
+    // applyCameraPath() queues the replacement for the GL thread to swap
+    // in atomically.  Live following can be toggled on/off without
+    // throwing the path away.
+    //
+    // R-key recording: while the transport is playing, R toggles a
+    // capture session that emits Lerp keyframes from the live camera pose
+    // every ~50 ms.  The captured keyframes splice into the existing
+    // path (replacing anything whose time falls inside the recording
+    // window).
+
+    std::vector<CameraKeyframe> getCameraPathCopy() const;
+    void applyCameraPath(std::vector<CameraKeyframe> path);
+    void clearCameraPath();
+
+    void setCameraPathFollowEnabled(bool enabled);
+    bool isCameraPathFollowEnabled() const noexcept { return cameraPathFollowEnabled_.load(); }
+
+    /// When true, the user keeps full manual control of the camera even if
+    /// a path is present — the path is still used for the audio listener
+    /// pose during export, but live playback no longer drives the camera.
+    void setFreeCameraOverride(bool freeCam) noexcept { freeCameraOverride_.store(freeCam); }
+    bool isFreeCameraOverride() const noexcept { return freeCameraOverride_.load(); }
+
+    void toggleCameraPathRecording();
+    bool isCameraPathRecording() const noexcept { return cameraPathRecording_.load(); }
+
+    /// User-facing capture granularity for live R-recording.  Default 1.0s
+    /// — the popup dropdown picks 0.1 / 0.25 / 0.5 / 1 / 2 / 5 etc.
+    void   setCameraRecordIntervalSec(double s) noexcept
+    { cameraRecordIntervalSec_.store(juce::jlimit(0.02, 30.0, s)); }
+    double getCameraRecordIntervalSec() const noexcept
+    { return cameraRecordIntervalSec_.load(); }
+
+    /// Captures the current camera pose at the current playhead time and
+    /// inserts it into the path as a Hold keyframe.  Safe from message
+    /// thread.  Returns true if queued (false when no scene loaded).
+    void addCameraHoldFromCurrent(double atTimeSec);
+
+    /// True iff at least one camera keyframe is set.
+    bool hasCameraPath() const noexcept { return cameraPathHasAny_.load(); }
+
+    /// Live camera pose snapshot — pose-only (position + yaw/pitch).  Used
+    /// by the CameraPathPopup to add Hold keyframes locally without round-
+    /// tripping through the GL thread.
+    CameraPose getCurrentCameraPose() const
+    {
+        CameraPose p;
+        p.pos      = camera.getPosition();
+        p.yawRad   = camera.getYaw();
+        p.pitchRad = camera.getPitch();
+        return p;
+    }
+
+    /// Pick block B in the viewport after calling this with block A's serial.
+    void beginDistancePick(int anchorSerial);
+    void cancelDistancePick() noexcept { distancePickActive_.store(false); }
+    bool isDistancePickActive() const noexcept { return distancePickActive_.load(); }
+
+    std::function<void(int anchorSerial, int targetSerial,
+                       float dx, float dy, float dz,
+                       float distanceMetres, float approxDb)> onDistanceMeasured;
 
     // ── Type filter (show / hide whole categories of blocks) ────────────────
     void setBlockTypeVisible(BlockType t, bool v)
@@ -802,6 +899,58 @@ private:
     std::atomic<bool> showWallXPlane_  { false };  // YZ plane (x = 0)  – off by default
     std::atomic<bool> showWallZPlane_  { false };  // XY plane (z = 0)  – off by default
     std::atomic<bool> showArrows_       { false }; //                  – off by default
+
+    // Audio anchor (frozen listener pose; camera restores on toggle off)
+    bool  audioAnchorActive_ = false;
+    Vec3f audioAnchorPos_;
+    Vec3f audioAnchorForward_;
+    Vec3f audioAnchorRight_;
+    Vec3f savedCameraPos_;
+    Vec3f savedCameraLookAt_;
+    std::atomic<bool> pendingAnchorOp_     { false };
+    std::atomic<bool> pendingAnchorEnable_ { false };
+
+    // Camera path (GL thread owned; snapshotted under cameraPathMutex_)
+    std::vector<CameraKeyframe>   cameraPath_;
+    mutable juce::CriticalSection cameraPathMutex_;
+    std::atomic<bool>             cameraPathHasAny_         { false };
+    std::atomic<bool>             cameraPathFollowEnabled_  { false };
+    std::atomic<bool>             cameraPathRecording_      { false };
+
+    // Pending camera-path ops (message thread → GL thread)
+    struct PendingPathOp
+    {
+        enum Type { None, Replace, Clear, AddHold,
+                    StartRecord, StopRecord, FollowSet };
+        Type   type = None;
+        bool   enable = false;
+        double timeSec = 0.0;
+        std::vector<CameraKeyframe> payload;
+    };
+    std::vector<PendingPathOp>    pendingPathOps_;
+    juce::CriticalSection         pendingPathOpMutex_;
+
+    // Live recording state (GL thread).  Works whether transport is playing
+    // or not — captures are spaced by wall-clock interval; keyframe times
+    // are derived from playhead-at-start + wall-clock elapsed.
+    bool   recordingActive_         = false;
+    double recordingStartSec_       = 0.0;   ///< Playhead time at record start
+    double recordingStartWallSec_   = 0.0;   ///< Wall-clock time at record start
+    double recordingLastCaptureWall_= 0.0;
+    std::vector<CameraKeyframe>  recordingBuffer_;
+
+    /// User-controlled capture rate.  Defaults to 1 s so a live R-take
+    /// produces a manageable list of keyframes; can be lowered down to
+    /// 0.02 s for finer hand-flown shots from the popup dropdown.
+    std::atomic<double> cameraRecordIntervalSec_{ 1.0 };
+
+    /// When true the live camera is NOT driven by the path during playback
+    /// — the user retains free-fly control.  The path still affects the
+    /// audio listener pose during offline export.
+    std::atomic<bool> freeCameraOverride_{ false };
+
+    std::atomic<bool> distancePickActive_        { false };
+    std::atomic<int>  distancePickAnchorSerial_  { -1 };
 
     // Per-block-type visibility filter.  Indexed by static_cast<size_t>(BlockType).
     // All types start visible; the View menu in MainComponent flips entries.

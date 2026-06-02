@@ -18,6 +18,18 @@ ExportAudioDialog::ExportAudioDialog()
     formatBox_.addItem(SceneAudioExporter::formatDescription(SceneAudioExporter::Format::Ogg), 4);
     formatBox_.setSelectedId(1, juce::dontSendNotification);
 
+    addAndMakeVisible(listenerHdr_);
+    listenerHdr_.setColour(juce::Label::textColourId, juce::Colour(0xffe2e6f2));
+    listenerHdr_.setJustificationType(juce::Justification::centredLeft);
+
+    addAndMakeVisible(listenerInfo_);
+    listenerInfo_.setColour(juce::Label::textColourId, juce::Colour(0xffaac8e8));
+    listenerInfo_.setJustificationType(juce::Justification::topLeft);
+    listenerInfo_.setMinimumHorizontalScale(1.0f);
+    listenerInfo_.setText(
+        "(listener pose will be filled in when the dialog opens)",
+        juce::dontSendNotification);
+
     addAndMakeVisible(exportBtn_);
     exportBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2a5298));
     exportBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -40,7 +52,52 @@ ExportAudioDialog::ExportAudioDialog()
             dw->exitModalState(0);
     };
 
-    setSize(400, 130);
+    setSize(440, 220);
+}
+
+void ExportAudioDialog::setListenerInfo(bool anchored,
+                                        float posX, float posY, float posZ,
+                                        float yawDeg, float pitchDeg)
+{
+    juce::String line;
+    if (anchored)
+    {
+        line = "ANCHORED at ("
+             + juce::String(posX, 1) + ", "
+             + juce::String(posY, 1) + ", "
+             + juce::String(posZ, 1) + ")  yaw "
+             + juce::String(yawDeg, 0) + " deg, pitch "
+             + juce::String(pitchDeg, 0) + " deg.\n"
+             + "Export will sound like this fixed listener pose.";
+        listenerInfo_.setColour(juce::Label::textColourId,
+                                juce::Colour(0xffaac8e8));
+    }
+    else
+    {
+        line = "Anchor not set. Export will use the current camera pose:\n"
+             + juce::String("(")
+             + juce::String(posX, 1) + ", "
+             + juce::String(posY, 1) + ", "
+             + juce::String(posZ, 1) + ")  yaw "
+             + juce::String(yawDeg, 0) + " deg, pitch "
+             + juce::String(pitchDeg, 0) + " deg.\n"
+             + "Tip: hit Anchor in the toolbar to lock a pose before exporting.";
+        listenerInfo_.setColour(juce::Label::textColourId,
+                                juce::Colour(0xffffcc66));
+    }
+    listenerInfo_.setText(line, juce::dontSendNotification);
+}
+
+void ExportAudioDialog::setListenerPathInfo(int numKeyframes,
+                                            double firstSec,
+                                            double lastSec)
+{
+    const juce::String line =
+        "CAMERA PATH active (" + juce::String(numKeyframes) + " keyframes, "
+        + juce::String(firstSec, 1) + "s -> " + juce::String(lastSec, 1) + "s).\n"
+        + "Export will animate the listener through the path.";
+    listenerInfo_.setColour(juce::Label::textColourId, juce::Colour(0xff9be0a0));
+    listenerInfo_.setText(line, juce::dontSendNotification);
 }
 
 SceneAudioExporter::Format ExportAudioDialog::selectedFormat() const
@@ -60,7 +117,11 @@ void ExportAudioDialog::resized()
     title_.setBounds(r.removeFromTop(22));
     r.removeFromTop(6);
     formatBox_.setBounds(r.removeFromTop(28));
-    r.removeFromTop(16);
+    r.removeFromTop(14);
+    listenerHdr_.setBounds(r.removeFromTop(20));
+    r.removeFromTop(2);
+    listenerInfo_.setBounds(r.removeFromTop(56));
+    r.removeFromTop(12);
     auto row = r.removeFromTop(32);
     cancelBtn_.setBounds(row.removeFromRight(100));
     row.removeFromRight(8);

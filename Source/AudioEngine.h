@@ -152,9 +152,9 @@ public:
 
     double getPlaybackRate() const noexcept { return playbackRate_.load(); }
 
-    // ── Doppler effect (Phase 4) ────────────────────────────────────────────
-    /// Push the listener (camera) world position so the audio thread can use
-    /// it when computing Doppler shifts.  Cheap atomics, safe from any thread.
+    // ── Spatial listener (camera-relative mix) ──────────────────────────────
+    /// World position of the audio listener (usually the camera, or the
+    /// frozen anchor when anchor mode is on).  1 grid unit = 1 metre.
     void setListenerPosition(float x, float y, float z) noexcept
     {
         listenerX_.store(x);
@@ -162,11 +162,54 @@ public:
         listenerZ_.store(z);
     }
 
+    /// Listener forward + right unit vectors (full 3-D forward, horizontal
+    /// right).  Updated each frame from the camera so pan and front/back
+    /// follow where you are looking.
+    void setListenerOrientation(float fwdX, float fwdY, float fwdZ,
+                                float rightX, float rightY, float rightZ) noexcept
+    {
+        listenerFwdX_.store(fwdX);
+        listenerFwdY_.store(fwdY);
+        listenerFwdZ_.store(fwdZ);
+        listenerRightX_.store(rightX);
+        listenerRightY_.store(rightY);
+        listenerRightZ_.store(rightZ);
+    }
+
+    /// 0.5 = gentler distance curve, 1.0 = default, 2.0 = aggressive falloff.
+    void setSpatialSensitivity(float s) noexcept
+    {
+        spatialSensitivity_.store(juce::jlimit(0.25f, 3.0f, s));
+    }
+
+    float getSpatialSensitivity() const noexcept { return spatialSensitivity_.load(); }
+
+    /// Read-only spatial metrics for a source at world (x,y,z) using the
+    /// same formulas as the live mix (safe from the message thread).
+    struct SpatialReadout
+    {
+        float distanceMetres = 0.f;
+        float gainLinear     = 1.f;
+        float approxDb       = 0.f;   ///< 20·log10(gain), clamped
+    };
+
+    SpatialReadout measureSourceAt(float x, float y, float z) const noexcept;
+
+    /// Pure spatial math, no atomics, no engine state.  Used by both the live
+    /// audio thread and the offline exporter so they cannot drift apart.
+    static void computeSpatialGainsStatic(float lx, float ly, float lz,
+                                          float fwdX, float fwdY, float fwdZ,
+                                          float rightX, float rightY, float rightZ,
+                                          float sensitivity,
+                                          float srcX, float srcY, float srcZ,
+                                          float& outGain, float& outPan,
+                                          float& outPitchRate,
+                                          float& outLeft, float& outRight) noexcept;
+
     void setDopplerEnabled(bool enabled) noexcept { dopplerEnabled_.store(enabled); }
     bool isDopplerEnabled() const noexcept        { return dopplerEnabled_.load(); }
 
-    /// Speed of sound in world (grid) units per second.  Lower = stronger
-    /// Doppler effect for the same source velocity.
+    /// Speed of sound in world (grid) units per second.  1 unit = 1 metre.
     void setSpeedOfSound(float c) noexcept
     {
         speedOfSound_.store(juce::jlimit(5.0f, 343.0f, c));
@@ -189,8 +232,11 @@ private:
     juce::AudioFormatManager formatManager_;
 
 
-    //stereo panning helper
-    void applySpatialPosition(ActiveVoice& voice, float x, float y,float z);
+    void applySpatialPosition(ActiveVoice& voice, float x, float y, float z);
+    void computeSpatialGains(float x, float y, float z,
+                             float& outGain, float& outPan,
+                             float& outPitchRate,
+                             float& outLeft, float& outRight) const noexcept;
 
     // ---- Active voices (audio-thread-owned) -----------------------------
     std::vector<ActiveVoice> activeVoices_;
@@ -213,12 +259,19 @@ private:
 
     std::atomic<float> playbackRate_ { 1.0f };
 
-    // Doppler state (audio-thread reads, message thread writes)
-    std::atomic<float> listenerX_      { 0.0f };
-    std::atomic<float> listenerY_      { 0.0f };
-    std::atomic<float> listenerZ_      { 0.0f };
-    std::atomic<bool>  dopplerEnabled_ { false };  // Off by default; user opt-in.
-    std::atomic<float> speedOfSound_   { 25.0f }; ///< world units / second
+    // Spatial listener state (audio-thread reads, message thread writes)
+    std::atomic<float> listenerX_       { 0.0f };
+    std::atomic<float> listenerY_       { 0.0f };
+    std::atomic<float> listenerZ_       { 0.0f };
+    std::atomic<float> listenerFwdX_    { 0.0f };
+    std::atomic<float> listenerFwdY_    { 0.0f };
+    std::atomic<float> listenerFwdZ_    { -1.0f };
+    std::atomic<float> listenerRightX_ { 1.0f };
+    std::atomic<float> listenerRightY_  { 0.0f };
+    std::atomic<float> listenerRightZ_  { 0.0f };
+    std::atomic<float> spatialSensitivity_ { 1.0f };
+    std::atomic<bool>  dopplerEnabled_  { false };
+    std::atomic<float> speedOfSound_    { 25.0f }; ///< grid-units / sec (25 m/s)
 
     // Transport-side flags (audio-thread reads, message thread writes)
     std::atomic<bool>  audioPaused_    { false };

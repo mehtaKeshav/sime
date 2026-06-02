@@ -1,6 +1,7 @@
 #include "SceneAudioExporter.h"
 #include "SequencerEngine.h"
 #include "TransportClock.h"
+#include "AudioEngine.h"
 
 #include <algorithm>
 #include <cmath>
@@ -52,32 +53,53 @@ namespace
         }
     };
 
-    constexpr float kExportSpeedOfSound = 25.0f;
-    constexpr float kExportListenerX    = 0.0f;
-    constexpr float kExportListenerY    = 0.0f;
-    constexpr float kExportListenerZ    = 0.0f;
-
-    float computeDopplerRate(bool enabled,
-                             float srcX, float srcY, float srcZ,
-                             float vx,   float vy,   float vz)
+    void applyListenerGainsAt(MixerVoice&         v,
+                              const ListenerPose& L,
+                              const Vec3f&        listenerPos,
+                              const Vec3f&        listenerFwd,
+                              const Vec3f&        listenerRight)
     {
-        if (!enabled) return 1.0f;
-        const float dx = kExportListenerX - srcX;
-        const float dy = kExportListenerY - srcY;
-        const float dz = kExportListenerZ - srcZ;
-        const float distSq = dx * dx + dy * dy + dz * dz;
-        if (distSq < 1e-4f) return 1.0f;
-        const float invDist = 1.0f / std::sqrt(distSq);
-        const float vRadial = (vx * dx + vy * dy + vz * dz) * invDist;
-        const float denom = juce::jmax(kExportSpeedOfSound * 0.4f,
-                                       kExportSpeedOfSound - vRadial);
-        return juce::jlimit(0.5f, 2.0f, kExportSpeedOfSound / denom);
+        AudioEngine::computeSpatialGainsStatic(
+            listenerPos.x,   listenerPos.y,   listenerPos.z,
+            listenerFwd.x,   listenerFwd.y,   listenerFwd.z,
+            listenerRight.x, listenerRight.y, listenerRight.z,
+            L.sensitivity,
+            v.posX, v.posY, v.posZ,
+            v.gain, v.pan, v.pitchRate,
+            v.leftGain, v.rightGain);
+    }
+
+    /// Resolve the listener pose at @p t — static fields when no path, else
+    /// sampled from `cameraPath`.  Always returns normalised forward/right.
+    void resolveListener(const ListenerPose& L, double t,
+                         Vec3f& outPos, Vec3f& outFwd, Vec3f& outRight)
+    {
+        if (L.pathFollow && !L.cameraPath.empty())
+        {
+            CameraPose fallback;
+            fallback.pos      = Vec3f{ L.posX, L.posY, L.posZ };
+            fallback.yawRad   = std::atan2(L.fwdX, -L.fwdZ);
+            fallback.pitchRad = std::asin(juce::jlimit(-1.0f, 1.0f, L.fwdY));
+
+            const auto p = CameraPathUtil::sample(L.cameraPath, t, fallback);
+            outPos = p.pos;
+            CameraPathUtil::poseDirs(p, outFwd, outRight);
+        }
+        else
+        {
+            outPos   = Vec3f{ L.posX, L.posY, L.posZ };
+            outFwd   = Vec3f{ L.fwdX, L.fwdY, L.fwdZ };
+            outRight = Vec3f{ L.rightX, L.rightY, L.rightZ };
+        }
     }
 
     void handleStartEvent(const SequencerEvent&                            ev,
                           std::vector<MixerVoice>&                         voices,
                           const std::unordered_map<int, juce::AudioBuffer<float>>& lib,
-                          bool                                              dopplerEnabled,
+                          const ListenerPose&                              listener,
+                          const Vec3f&                                     lpos,
+                          const Vec3f&                                     lfwd,
+                          const Vec3f&                                     lright,
                           double                                            writerSampleRate)
     {
         auto it = lib.find(ev.soundId);
@@ -101,22 +123,9 @@ namespace
         voice.velX = ev.hasVelocity ? ev.velocityX : 0.0f;
         voice.velY = ev.hasVelocity ? ev.velocityY : 0.0f;
         voice.velZ = ev.hasVelocity ? ev.velocityZ : 0.0f;
-        voice.dopplerRate = computeDopplerRate(dopplerEnabled,
-                                               voice.posX, voice.posY, voice.posZ,
-                                               voice.velX, voice.velY, voice.velZ);
+        voice.dopplerRate = 1.0f;   // Doppler still excluded from offline render.
 
-        constexpr float refDist = 5.0f;
-        const float dist = std::abs(ev.blockZ);
-        voice.gain = juce::jlimit(0.0f, 1.0f, refDist / (refDist + dist));
-
-        voice.pitchRate = juce::jlimit(0.25f, 4.0f,
-                                       std::pow(2.0f, ev.blockY / 12.0f));
-
-        voice.pan = juce::jlimit(-1.0f, 1.0f, ev.blockX / 20.0f);
-        const float angle = (voice.pan + 1.0f) * 0.25f
-                              * juce::MathConstants<float>::pi;
-        voice.leftGain  = voice.gain * std::cos(angle);
-        voice.rightGain = voice.gain * std::sin(angle);
+        applyListenerGainsAt(voice, listener, lpos, lfwd, lright);
 
         voices.push_back(voice);
     }
@@ -132,21 +141,15 @@ namespace
 
     void handleMovementEvent(const SequencerEvent& ev,
                              std::vector<MixerVoice>& voices,
-                             bool dopplerEnabled)
+                             const ListenerPose&      listener,
+                             const Vec3f&             lpos,
+                             const Vec3f&             lfwd,
+                             const Vec3f&             lright)
     {
         for (auto& voice : voices)
         {
             if (voice.blockSerial == ev.blockSerial && !voice.isFinished())
             {
-                float pan = juce::jmap(ev.blockX, -20.0f, 20.0f, -1.0f, 1.0f);
-                pan = juce::jlimit(-1.0f, 1.0f, pan);
-                voice.pan = pan;
-
-                const float leftGain  = (1.0f - pan) * 0.5f;
-                const float rightGain = (1.0f + pan) * 0.5f;
-                voice.leftGain  = voice.gain * leftGain;
-                voice.rightGain = voice.gain * rightGain;
-
                 voice.posX = ev.blockX;
                 voice.posY = ev.blockY;
                 voice.posZ = ev.blockZ;
@@ -156,9 +159,7 @@ namespace
                     voice.velY = ev.velocityY;
                     voice.velZ = ev.velocityZ;
                 }
-                voice.dopplerRate = computeDopplerRate(dopplerEnabled,
-                                                       voice.posX, voice.posY, voice.posZ,
-                                                       voice.velX, voice.velY, voice.velZ);
+                applyListenerGainsAt(voice, listener, lpos, lfwd, lright);
             }
         }
     }
@@ -184,7 +185,10 @@ namespace
                         std::vector<BlockEntry>&           blocks,
                         std::vector<MixerVoice>&           voices,
                         const std::unordered_map<int, juce::AudioBuffer<float>>& lib,
-                        bool                                dopplerEnabled,
+                        const ListenerPose&                 listener,
+                        const Vec3f&                        lpos,
+                        const Vec3f&                        lfwd,
+                        const Vec3f&                        lright,
                         double                              writerSampleRate)
     {
         for (const auto& ev : events)
@@ -192,11 +196,12 @@ namespace
             applyMovementToBlocks(ev, blocks);
 
             if (ev.type == SequencerEventType::Start)
-                handleStartEvent(ev, voices, lib, dopplerEnabled, writerSampleRate);
+                handleStartEvent(ev, voices, lib, listener,
+                                 lpos, lfwd, lright, writerSampleRate);
             else if (ev.type == SequencerEventType::Stop)
                 handleStopEvent(ev, voices);
             else if (ev.type == SequencerEventType::Movement)
-                handleMovementEvent(ev, voices, dopplerEnabled);
+                handleMovementEvent(ev, voices, listener, lpos, lfwd, lright);
         }
     }
 
@@ -343,6 +348,7 @@ juce::String formatDescription(Format f)
 bool bounceToFile(const std::vector<BlockEntry>&                            blocksIn,
                   const std::unordered_map<int, juce::AudioBuffer<float>>& sampleLibrary,
                   double                                                   outputSampleRate,
+                  const ListenerPose&                                      listener,
                   const juce::File&                                        outputFile,
                   Format                                                   format,
                   juce::String&                                            errorMessage)
@@ -431,10 +437,22 @@ bool bounceToFile(const std::vector<BlockEntry>&                            bloc
         for (auto& bk : blocks)
             bk.effectiveMuted = bk.isMuted;
 
+        const double chunkTime = clock.currentTimeSec();
+        Vec3f lpos, lfwd, lright;
+        resolveListener(listener, chunkTime, lpos, lfwd, lright);
+
+        // Re-mix any still-playing voices for the new listener pose so a
+        // sustained note slides through pan / gain as the camera moves.
+        if (listener.pathFollow && !listener.cameraPath.empty())
+        {
+            for (auto& v : voices)
+                if (!v.isFinished() && !v.stopping)
+                    applyListenerGainsAt(v, listener, lpos, lfwd, lright);
+        }
+
         const auto events = sequencer.update(clock, blocks);
-        // Doppler ignored in export (matches the live default-off behaviour).
         dispatchEvents(events, blocks, voices, sampleLibrary,
-                       /*dopplerEnabled*/ false, rate);
+                       listener, lpos, lfwd, lright, rate);
 
         if (thisBlock == kChunkSamples)
             mixChunk(chunk, voices);

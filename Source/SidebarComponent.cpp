@@ -24,6 +24,7 @@ SidebarComponent::SidebarComponent()
     addAndMakeVisible(hideToggle_);
     addAndMakeVisible(muteScheduleBtn_);
     addAndMakeVisible(matchSoundDurBtn_);
+    addAndMakeVisible(distanceBtn_);
     addAndMakeVisible(applyButton);
     addAndMakeVisible(resetDefaultsBtn_);
 
@@ -85,6 +86,20 @@ SidebarComponent::SidebarComponent()
     {
         if (selectedBlock_ && onMatchDurationToSound)
             onMatchDurationToSound(selectedBlock_->serial);
+    };
+
+    distanceBtn_.setColour(juce::TextButton::buttonColourId,
+                           juce::Colour(0xff242a3c));
+    distanceBtn_.setColour(juce::TextButton::textColourOffId,
+                           juce::Colour(0xffe2e6f2));
+    distanceBtn_.setTooltip(
+        "Measure distance from this block (A) to another block (B). "
+        "Click Distance, then click block B in the viewport.");
+    distanceBtn_.onClick = [this]
+    {
+        if (!selectedBlock_ || !onRequestDistancePick)
+            return;
+        onRequestDistancePick(selectedBlock_->serial);
     };
 
     keyframesBtn_.setColour(juce::TextButton::buttonColourId,
@@ -467,8 +482,17 @@ void SidebarComponent::resized()
 
     placeRow(durationEditor, y, editorX, editorW, editorH);
 
-    // ── MOVEMENT section ───────────────────────────────────────────────────
+    // ── SPATIAL section ────────────────────────────────────────────────────
     y += editorH + kSectionBandH;
+
+    placeRow(distanceBtn_, y, margin, getWidth() - 2 * margin, editorH);
+    y += editorH + rowGap;
+
+    y += 36;   // listener readout (paint)
+    y += 44;   // A→B distance readout (paint)
+
+    // ── MOVEMENT section ───────────────────────────────────────────────────
+    y += kSectionBandH;
 
     placeRow(movementEnabledToggle, y, margin, getWidth() - 2 * margin, 28);
     y += 32;
@@ -767,6 +791,38 @@ void SidebarComponent::paint(juce::Graphics& g)
         g.drawText("Duration:", margin, y, labelW, editorH, juce::Justification::centredLeft);
         y += editorH;
 
+        // ── SPATIAL section ──────────────────────────────────────────────
+        drawSectionHeader("SPATIAL (1 unit = 1 m)", y);
+        y += kSectionBandH;
+
+        y += editorH + rowGap;   // Distance button row
+
+        g.setFont(juce::Font("Public Sans", 12.0f, juce::Font::plain));
+        g.setColour(text.withAlpha(0.92f));
+        if (spatialListenerLine_.isNotEmpty())
+        {
+            g.drawText(spatialListenerLine_,
+                       margin, y, getWidth() - 2 * margin, 32,
+                       juce::Justification::topLeft);
+        }
+        y += 36;
+
+        if (spatialDistanceLine_.isNotEmpty())
+        {
+            g.setColour(juce::Colour(0xffc8e8ff));
+            g.drawFittedText(spatialDistanceLine_,
+                             margin, y, getWidth() - 2 * margin, 40,
+                             juce::Justification::topLeft, 3);
+        }
+        else if (distancePickActive_)
+        {
+            g.setColour(juce::Colour(0xffffcc66));
+            g.drawText("Click block B in the viewport...",
+                       margin, y, getWidth() - 2 * margin, 24,
+                       juce::Justification::centredLeft);
+        }
+        y += 44;
+
         // ── MOVEMENT section ─────────────────────────────────────────────
         drawSectionHeader("MOVEMENT", y);
         y += kSectionBandH;
@@ -990,8 +1046,36 @@ void SidebarComponent::showBlockInfo(const BlockEntry& block,
     if (audioAnalyzer_)
         audioAnalysis_ = audioAnalyzer_(block);
 
+    spatialDistanceLine_.clear();
+    distancePickActive_ = false;
+    distanceBtn_.setButtonText("Distance...");
+
     infoScrollY_ = 0;
     resized();
+    repaint();
+}
+
+void SidebarComponent::setListenerSpatialReadout(const juce::String& line)
+{
+    if (spatialListenerLine_ != line)
+    {
+        spatialListenerLine_ = line;
+        repaint();
+    }
+}
+
+void SidebarComponent::setBlockDistanceReadout(const juce::String& line)
+{
+    spatialDistanceLine_ = line;
+    distancePickActive_ = false;
+    distanceBtn_.setButtonText("Distance...");
+    repaint();
+}
+
+void SidebarComponent::setDistancePickActive(bool picking)
+{
+    distancePickActive_ = picking;
+    distanceBtn_.setButtonText(picking ? "Pick B..." : "Distance...");
     repaint();
 }
 

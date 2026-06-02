@@ -10,7 +10,8 @@
 namespace
 {
     static constexpr char     kMagic[4] = { 'S', 'I', 'M', 'E' };
-    static constexpr uint16_t kVersion  = 9;   // v9: replaces muteStartSec/muteEndSec with a muteWindows vector
+    static constexpr uint16_t kVersion  = 11;  // v11: camera-path keyframes now carry holdDurationSec
+    static constexpr char     kCamPathMagic[4] = { 'C', 'P', 'T', 'H' };
 
     // Tiny endian-agnostic helpers (no-op on x86 but keeps intent clear)
     template <typename T>
@@ -21,6 +22,13 @@ namespace
 }
 
 bool SceneFile::save(const std::string& path, const std::vector<BlockEntry>& blocks)
+{
+    return save(path, blocks, {});
+}
+
+bool SceneFile::save(const std::string& path,
+                     const std::vector<BlockEntry>&     blocks,
+                     const std::vector<CameraKeyframe>& cameraPath)
 {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f.is_open()) return false;
@@ -108,11 +116,35 @@ bool SceneFile::save(const std::string& path, const std::vector<BlockEntry>& blo
         }
     }
 
+    // --- v10: optional camera-path trailer (always emitted; can be empty) ---
+    f.write(kCamPathMagic, 4);
+    writeVal<uint32_t>(f, static_cast<uint32_t>(cameraPath.size()));
+    for (const auto& k : cameraPath)
+    {
+        writeVal<double>(f, k.timeSec);
+        writeVal<float>(f, k.pos.x);
+        writeVal<float>(f, k.pos.y);
+        writeVal<float>(f, k.pos.z);
+        writeVal<float>(f, k.yawRad);
+        writeVal<float>(f, k.pitchRad);
+        writeVal<uint8_t>(f, k.mode);
+        writeVal<float>(f, k.holdDurationSec);   // v11
+    }
+
     return f.good();
 }
 
 bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks)
 {
+    std::vector<CameraKeyframe> ignored;
+    return load(path, outBlocks, ignored);
+}
+
+bool SceneFile::load(const std::string& path,
+                     std::vector<BlockEntry>&    outBlocks,
+                     std::vector<CameraKeyframe>& outCameraPath)
+{
+    outCameraPath.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return false;
 
@@ -321,6 +353,45 @@ bool SceneFile::load(const std::string& path, std::vector<BlockEntry>& outBlocks
 
         b.resetPlaybackState();
         outBlocks.push_back(std::move(b));
+    }
+
+    // --- v10: optional camera-path trailer.  Sniff for the magic; if it's
+    // not there, this is an older file with no path — leave outCameraPath
+    // empty and treat the load as successful.
+    if (version >= 10)
+    {
+        char tag[4] = { 0, 0, 0, 0 };
+        if (f.read(tag, 4) && std::memcmp(tag, kCamPathMagic, 4) == 0)
+        {
+            uint32_t kfCount = 0;
+            if (!readVal(f, kfCount)) return f.eof();
+            if (kfCount > 1000000)    return false;
+
+            outCameraPath.reserve(kfCount);
+            for (uint32_t i = 0; i < kfCount; ++i)
+            {
+                CameraKeyframe k;
+                if (!readVal(f, k.timeSec))   return false;
+                if (!readVal(f, k.pos.x))     return false;
+                if (!readVal(f, k.pos.y))     return false;
+                if (!readVal(f, k.pos.z))     return false;
+                if (!readVal(f, k.yawRad))    return false;
+                if (!readVal(f, k.pitchRad))  return false;
+                if (!readVal(f, k.mode))      return false;
+
+                // v11: per-keyframe Hold duration.  Pre-v11 files don't
+                // store it; default to 0 (= hold until next keyframe).
+                if (version >= 11)
+                {
+                    if (!readVal(f, k.holdDurationSec)) return false;
+                }
+                else
+                {
+                    k.holdDurationSec = 0.0f;
+                }
+                outCameraPath.push_back(k);
+            }
+        }
     }
 
     return f.good() || f.eof();

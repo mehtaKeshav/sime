@@ -61,6 +61,13 @@ public:
     /// Copy of the block currently shown in the Info panel (if any).
     std::optional<BlockEntry> getSelectedBlockCopy() const { return selectedBlock_; }
 
+    void setListenerSpatialReadout(const juce::String& line);
+    void setBlockDistanceReadout(const juce::String& line);
+    void setDistancePickActive(bool picking);
+
+    /// User clicked Distance — pick block B in the viewport (A = current block).
+    std::function<void(int anchorSerial)> onRequestDistancePick;
+
     /// Callback fired when the user clicks Apply.  Carries every editable
     /// field on the Info panel.  `playbackMode` is a uint8_t so the header
     /// doesn't have to pull in BlockEntry.h transitively for downstream
@@ -172,6 +179,12 @@ private:
 
     // One-click: match the block's region duration to the loaded sample length
     juce::TextButton matchSoundDurBtn_ { "Match Duration to Sound" };
+
+    juce::TextButton distanceBtn_ { "Distance..." };
+
+    juce::String spatialListenerLine_;
+    juce::String spatialDistanceLine_;
+    bool         distancePickActive_ = false;
 
     juce::TextButton applyButton      { "Apply" };
     juce::TextButton resetDefaultsBtn_{ "Reset to Default" };

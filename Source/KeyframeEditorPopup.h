@@ -95,16 +95,22 @@ private:
     juce::TextButton applyButton_ { "Apply" };
     juce::TextButton cancelButton_{ "Cancel" };
 
+    // Time granularity selector — rounds row times to a multiple of the
+    // chosen interval.  Default is "Off" so existing scenes look unchanged.
+    juce::Label    snapLabel_;
+    juce::ComboBox snapBox_;
+    void           applySnapToDraft();
+
     int scrollY_ = 0;
 
-    static constexpr int kWidth   = 520;
-    static constexpr int kHeight  = 500;
+    static constexpr int kWidth   = 540;
+    static constexpr int kHeight  = 520;
     static constexpr int kPad     = 16;
     // Header band: title (24) + subtitle (18) + spacing (8) + column header (16) + spacing (8)
     static constexpr int kHeaderH = 90;
     static constexpr int kRowH    = 30;
     static constexpr int kRowGap  = 8;
-    static constexpr int kFooterH = 96;
+    static constexpr int kFooterH = 124;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(KeyframeEditorPopup)
 };

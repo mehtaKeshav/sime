@@ -36,11 +36,23 @@
 
 #include "MathUtils.h"
 #include "BlockEntry.h"
+#include "CameraPath.h"
 #include <vector>
 #include <string>
 
 namespace SceneFile
 {
+    /// v9 entry-point — kept for callers that don't care about the camera path.
     bool save(const std::string& path, const std::vector<BlockEntry>& blocks);
     bool load(const std::string& path, std::vector<BlockEntry>& outBlocks);
+
+    /// v10 entry-points — same binary file, plus an optional trailing camera-
+    /// path block.  v9 readers ignore the trailer; v10 readers fall back to an
+    /// empty path on older files.
+    bool save(const std::string& path,
+              const std::vector<BlockEntry>&     blocks,
+              const std::vector<CameraKeyframe>& cameraPath);
+    bool load(const std::string& path,
+              std::vector<BlockEntry>&    outBlocks,
+              std::vector<CameraKeyframe>& outCameraPath);
 }

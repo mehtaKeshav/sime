@@ -8,6 +8,8 @@
 #include "MovementConfirmPopup.h"
 #include "StartupMenuComponent.h"
 #include "SceneAudioExporter.h"
+#include "CameraPathPopup.h"
+#include "HelpPopup.h"
 
 class MainComponent : public juce::Component, private juce::Timer
 {
@@ -66,13 +68,21 @@ private:
     //   * Floor   = XZ plane (y = 0)         – horizontal ground
     //   * YZ Wall = vertical wall at x = 0   – contains the Y and Z axes
     //   * XY Wall = vertical wall at z = 0   – contains the X and Y axes
-    juce::TextButton showFloorBtn_   { "Floor" };
-    juce::TextButton showWallXBtn_   { "YZ Wall" };
-    juce::TextButton showWallZBtn_   { "XY Wall" };
-    juce::TextButton showArrowsBtn_  { "Arrows" };
+    juce::TextButton layersMenuBtn_ { juce::String("Layers ") + juce::String::fromUTF8("\xe2\x96\xbe") };
     juce::TextButton dopplerBtn_     { "Doppler" };
+    juce::TextButton anchorBtn_      { "Anchor" };
+    juce::TextButton pathEditBtn_    { "Path..." };
+    juce::TextButton freeCamBtn_     { "Free Cam" };
+    juce::TextButton helpBtn_        { "Help" };
+    juce::Slider     spatialSensSlider_;
+
+    std::unique_ptr<CameraPathPopup> cameraPathPopup_;
 
     void configureToggleButton(juce::TextButton& b);
+    void refreshSpatialSidebarReadout();
+    void showCameraPathPopup();
+    void showHelpPopup();
+    void showLayersMenu();
 
     // ── File / View / Mute menus (DAW-style) ────────────────────────────────
     juce::TextButton fileMenuBtn_;

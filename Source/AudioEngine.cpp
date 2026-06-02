@@ -426,41 +426,6 @@ void AudioEngine::dispatchEvent(const SequencerEvent& ev)
             }
         }
     }
-    {
-        // Update spatial position of playing voice
-        for (auto& voice : activeVoices_)
-        {
-            if (voice.blockSerial == ev.blockSerial && !voice.isFinished())
-            {
-                // Update pan based on X position (simple spatial audio)
-                float pan = juce::jmap(ev.blockX, -20.0f, 20.0f, -1.0f, 1.0f);
-                voice.pan = juce::jlimit(-1.0f, 1.0f, pan);
-
-                // Recalculate gains
-                float leftGain = (1.0f - voice.pan) * 0.5f;
-                float rightGain = (1.0f + voice.pan) * 0.5f;
-                voice.leftGain = voice.gain * leftGain;
-                voice.rightGain = voice.gain * rightGain;
-
-                // Update cached source pos
-                voice.posX = ev.blockX;
-                voice.posY = ev.blockY;
-                voice.posZ = ev.blockZ;
-                if (ev.hasVelocity)
-                {
-                    voice.velX = ev.velocityX;
-                    voice.velY = ev.velocityY;
-                    voice.velZ = ev.velocityZ;
-                }
-                voice.dopplerRate = computeDopplerRate(voice.posX, voice.posY, voice.posZ,
-                                                       voice.velX, voice.velY, voice.velZ);
-
-                DBG("Updated spatial audio for block " << ev.blockSerial
-                    << " at X=" << ev.blockX << ", pan=" << voice.pan
-                    << ", doppler=" << voice.dopplerRate);
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -540,33 +505,87 @@ void AudioEngine::handleStopEvent(const SequencerEvent& ev)
     }
 }
 
+void AudioEngine::computeSpatialGainsStatic(float lx, float ly, float lz,
+                                            float fxIn, float fyIn, float fzIn,
+                                            float rxIn, float ryIn, float rzIn,
+                                            float sensitivity,
+                                            float x, float y, float z,
+                                            float& outGain, float& outPan,
+                                            float& outPitchRate,
+                                            float& outLeft, float& outRight) noexcept
+{
+    const float relX = x - lx;
+    const float relY = y - ly;
+    const float relZ = z - lz;
+
+    const float dist = std::sqrt(relX * relX + relY * relY + relZ * relZ);
+
+    // 1 grid unit = 1 metre.  Higher sensitivity → smaller refDist → steeper falloff.
+    const float refDist = 3.0f / juce::jmax(0.35f, sensitivity);
+    outGain = (dist < 1e-3f)
+            ? 1.0f
+            : juce::jlimit(0.0f, 1.0f, refDist / (refDist + dist));
+
+    // World Y → pitch (one semitone per grid unit).
+    outPitchRate = juce::jlimit(0.25f, 4.0f, std::pow(2.0f, y / 12.0f));
+
+    // Camera-relative horizontal pan: project onto listener forward / right.
+    float fx = fxIn, fy = fyIn, fz = fzIn;
+    float rx = rxIn, ry = ryIn, rz = rzIn;
+    const float fwdLen = std::sqrt(fx * fx + fy * fy + fz * fz);
+    const float rgtLen = std::sqrt(rx * rx + ry * ry + rz * rz);
+    if (fwdLen > 1e-4f) { fx /= fwdLen; fy /= fwdLen; fz /= fwdLen; }
+    if (rgtLen > 1e-4f) { rx /= rgtLen; ry /= rgtLen; rz /= rgtLen; }
+
+    const float forward = relX * fx + relY * fy + relZ * fz;
+    const float right   = relX * rx + relY * ry + relZ * rz;
+
+    const float panAngle = std::atan2(right, forward + 1e-4f);
+    outPan = juce::jlimit(-1.0f, 1.0f, std::sin(panAngle));
+
+    // Stronger rear attenuation so "behind you" is obvious in headphones.
+    const float frontNorm = (dist > 1e-3f) ? (forward / dist) : 1.0f;
+    const float rearAtten = juce::jmap(juce::jlimit(-1.0f, 1.0f, frontNorm),
+                                       -1.0f, 1.0f, 0.35f, 1.0f);
+
+    const float eqPan = (outPan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+    outLeft  = outGain * rearAtten * std::cos(eqPan);
+    outRight = outGain * rearAtten * std::sin(eqPan);
+}
+
+void AudioEngine::computeSpatialGains(float x, float y, float z,
+                                      float& outGain, float& outPan,
+                                      float& outPitchRate,
+                                      float& outLeft, float& outRight) const noexcept
+{
+    computeSpatialGainsStatic(listenerX_.load(),  listenerY_.load(),  listenerZ_.load(),
+                              listenerFwdX_.load(), listenerFwdY_.load(), listenerFwdZ_.load(),
+                              listenerRightX_.load(), listenerRightY_.load(), listenerRightZ_.load(),
+                              spatialSensitivity_.load(),
+                              x, y, z,
+                              outGain, outPan, outPitchRate, outLeft, outRight);
+}
+
 void AudioEngine::applySpatialPosition(ActiveVoice& voice, float x, float y, float z)
 {
-    // XZ plane distance from listener at origin
-    const float distance = std::sqrt(x * x + z * z);
+    computeSpatialGains(x, y, z,
+                          voice.gain, voice.pan, voice.pitchRate,
+                          voice.leftGain, voice.rightGain);
+}
 
-    // Volume from Euclidean distance
-    constexpr float refDist = 5.0f;
-    voice.gain = juce::jlimit(0.0f, 1.0f, refDist / (refDist + distance));
+AudioEngine::SpatialReadout AudioEngine::measureSourceAt(float x, float y, float z) const noexcept
+{
+    SpatialReadout r;
+    float pan = 0.f, pitch = 1.f, L = 0.f, R = 0.f;
+    computeSpatialGains(x, y, z, r.gainLinear, pan, pitch, L, R);
 
-    // Y controls pitch only
-    voice.pitchRate = juce::jlimit(0.25f, 4.0f,
-        std::pow(2.0f, y / 12.0f));
-
-    // Direction in XZ plane
-    const float angle = std::atan2(x, z);
-
-    // Stereo pan from direction
-    const float pan = std::sin(angle);
-    voice.pan = juce::jlimit(-1.0f, 1.0f, pan);
-
-    // Front/back effect: rear sounds slightly reduced
-    const float frontBack = std::cos(angle);
-    const float rearAttenuation = juce::jmap(frontBack, -1.0f, 1.0f, 0.65f, 1.0f);
-
-    // Equal-power stereo panning
-    const float panAngle = (voice.pan + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
-
-    voice.leftGain  = voice.gain * rearAttenuation * std::cos(panAngle);
-    voice.rightGain = voice.gain * rearAttenuation * std::sin(panAngle);
+    const float lx = listenerX_.load();
+    const float ly = listenerY_.load();
+    const float lz = listenerZ_.load();
+    const float dx = x - lx, dy = y - ly, dz = z - lz;
+    r.distanceMetres = std::sqrt(dx * dx + dy * dy + dz * dz);
+    r.approxDb = (r.gainLinear > 1e-5f)
+               ? 20.0f * std::log10(r.gainLinear)
+               : -80.0f;
+    return r;
 }

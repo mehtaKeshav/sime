@@ -73,6 +73,10 @@ public:
 
     int entryForSoundId(int soundId) const;
 
+    /// Pick a sensible default sample for @p t and register it with @p engine.
+    /// Returns runtime soundId, or -1 for Custom / when nothing could load.
+    int defaultSoundForBlockType(BlockType t, AudioEngine& engine);
+
 private:
     juce::File                                   root_;
     std::vector<SoundEntry>                      entries_;

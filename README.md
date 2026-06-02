@@ -3,7 +3,7 @@
 A 3D voxel-based spatial audio sequencer built with JUCE and OpenGL 3.3.  
 Place blocks in 3D space, assign sounds and timing to them, and play back a spatial audio composition where position directly shapes how everything sounds.
 
-Move a block left or right and the audio pans. Place it higher and the pitch goes up. Push it further out on Z and it gets quieter. The goal is to make music composition spatial and visual instead of the traditional flat timeline.
+Move a block and the mix changes with **where you are listening from** (the camera): left/right pan, louder when close and quieter when far, higher pitch when the block is above you. One grid unit is treated as **one metre**. The goal is to make music composition spatial and visual instead of the traditional flat timeline.
 
 ---
 
@@ -142,7 +142,8 @@ If `cmake` is not found, add `C:\Program Files\CMake\bin` to PATH and reopen you
 | `Space` | Move up |
 | `Ctrl` | Move down |
 | `Scroll wheel` | Zoom / dolly |
-| `R` | Reset camera to `(8, 8, 8)` |
+| `Home` | Reset camera to `(8, 8, 8)` |
+| `R` | Toggle camera-path recording (see [Camera Path](#camera-path-listener-keyframes)) |
 
 > Click inside the viewport first to give it keyboard focus.
 
@@ -191,7 +192,7 @@ All four views look at the origin (0,0,0) from a distance with a slight downward
 
 | Input | Action |
 |-------|--------|
-| `E` | Toggle edit mode |
+| `Tab` | Toggle edit mode |
 | `RMB` on block (edit mode) | Open block edit popup |
 | `LMB` on block (normal mode) | Select block (Block Info panel updates) |
 | `Alt + LMB` on block (edit mode) | Select block and start movement recording |
@@ -208,7 +209,7 @@ All four views look at the origin (0,0,0) from a distance with a slight downward
 The toolbar at the top of the viewport lays out left-to-right as:
 
 ```
-[Type pill] [Type dropdown]  …  [Floor] [YZ Wall] [XY Wall] [Arrows] [Doppler]  [Mute ▾] [View ▾] [File ▾]
+[Type pill] [Type dropdown]  …  [Layers ▾] [Doppler] [Anchor] [Path…] [Free Cam] [Spatial━━]  [Mute ▾] [View ▾] [File ▾] [Help]
 ```
 
 ### Type pill + dropdown (left)
@@ -218,17 +219,17 @@ The toolbar at the top of the viewport lays out left-to-right as:
 | **Color pill** | Shows the active instrument name and a swatch in that type’s color. |
 | **Dropdown** | Picks one of **23 block types** grouped by category (Synth, Strings, Woodwinds, Brass, Percussion, Special). This is what the next `LMB` placement will create. |
 
-### View-element toggles (centre-right)
+### View-element controls (centre-right)
 
-All five are sticky on/off pills.  Defaults: only **Floor** is on.
-
-| Toggle | What it does |
+| Control | What it does |
 |--------|--------------|
-| **Floor** | Show the XZ ground plane mesh. |
-| **YZ Wall** | Show the YZ plane (x = 0).  Off by default. |
-| **XY Wall** | Show the XY plane (z = 0).  Off by default. |
-| **Arrows** | Show the 3D gizmo arrows on the selected block.  Off by default. |
+| **Layers ▾** | Drop-down menu of viewport overlays (ticked = visible): **Floor**, **YZ Wall**, **XY Wall**, **Move arrows**. |
 | **Doppler** | Toggle the Doppler-effect pitch shift on moving voices.  Off by default. |
+| **Anchor** | Freeze the **audio** listener at the current camera pose; fly around to compose “from here”; toggle off to snap the view back. |
+| **Path…** | Open the camera-path editor (list of Hold / Lerp keyframes; add static viewpoints or record live segments).  Whenever the path contains at least one keyframe the camera **auto-follows** during playback **and** while scrubbing the timeline (so you get a live preview).  Recording always overrides following. |
+| **Free Cam** | Override the path's hold on the camera while keeping the path data intact.  ON = user keeps full manual control even mid-playback.  OFF = camera follows path.  Useful when you want to scout shots while a path is loaded. |
+| **Spatial** | Falloff sensitivity (0.25 = gentle … 3.0 = aggressive).  Default 1.0. |
+| **Help** | Show the keyboard / mouse cheat-sheet. |
 
 ### `Mute ▾` menu
 
@@ -283,7 +284,7 @@ the fold.  Apply commits everything atomically.
 
 ### Block edit popup (right-click in edit mode)
 
-In **edit mode** (`E`), **RMB** a block to open a floating edit window.  The
+In **edit mode** (`Tab`), **RMB** a block to open a floating edit window.  The
 popup is now a focused timing + sound editor — it does **not** carry loop
 controls anymore (they live in the Block Info panel above so loop, length,
 and gap stay together).  For non-Custom blocks it embeds the searchable
@@ -328,18 +329,24 @@ If the picker still says the library is not loaded, see **Troubleshooting (sound
 1. Launch the app and click the viewport to focus it.
 2. Fly the camera with `RMB drag` + `WASD`.
 3. Place blocks with `LMB`. Use `Shift + LMB` to place blocks in mid-air.
-4. Press `E` to enter edit mode.
+4. Press `Tab` to enter edit mode.
 5. `RMB`-click any block to set its **Start time**, **Duration**, and **Sound** in the popup.
 6. Press **Play** in the transport bar.
-7. Blocks highlight as they trigger. Listen for spatial differences — left/right panning, pitch changes by height, volume falloff by depth.
+7. Blocks highlight as they trigger. Fly around with WASD while playing — pan and level should follow **your head**, not the world origin.
 
-**Spatial audio mapping:**
+**Spatial audio mapping** (listener = camera unless **Anchor** is on):
 
-| Axis | Effect |
-|------|--------|
-| X (left/right) | Stereo pan (equal-power) |
-| Y (up/down) | Pitch — each grid unit = one semitone up |
-| Z (near/far) | Volume — inverse distance falloff |
+| Input | Effect |
+|-------|--------|
+| **Listener pose** | Camera position + look direction each frame (`AudioEngine::setListenerPosition` / `setListenerOrientation`) |
+| **Horizontal offset** | Stereo pan (equal-power), projected onto camera right vs forward |
+| **Distance** | Level — `refDist / (refDist + distance)` with `refDist ≈ 3 m`, scaled by toolbar **Spatial** sensitivity |
+| **Behind listener** | Extra attenuation (~35% at full rear) so “behind you” is obvious in headphones |
+| **World Y** | Pitch — each grid unit = one semitone (`2^(y/12)`) |
+| **Toolbar Spatial** | Slider 0.25–3.0 (default 1.0); higher = steeper falloff |
+| **Toolbar Anchor** | Freeze the audio listener at the current view; camera can still move; toggle off restores the view |
+| **Sidebar → SPATIAL** | Live “from listener” distance (m) and approximate dB for the selected block; **Distance…** measures A→B in metres (click block B in the viewport) |
+| **New placements** | Default sample from the CSV library per block type (violin synth fallback if the library is missing) |
 
 **Block types (23 total, organized by category):**
 
@@ -354,7 +361,7 @@ The toolbar at the top of the viewport shows the active block type as a color "p
 | Percussion | Drum, Percussion |
 | Special    | Custom (user WAV) |
 
-Each type has a distinct color in the 3D viewport. After placing a block, hit `E` and right-click it to open the **edit popup**, which embeds a searchable list of every sample for that block's category — type a note name (e.g. `A4`), dynamic (`forte`), or articulation (`arco`) to filter ~1,500 samples instantly. The chosen WAV is decoded on commit (lazy load) so the picker is responsive even with 13,759 samples in the library.
+Each type has a distinct color in the 3D viewport. After placing a block, hit `Tab` and right-click it to open the **edit popup**, which embeds a searchable list of every sample for that block's category — type a note name (e.g. `A4`), dynamic (`forte`), or articulation (`arco`) to filter ~1,500 samples instantly. The chosen WAV is decoded on commit (lazy load) so the picker is responsive even with 13,759 samples in the library.
 
 For full details of the sample library and lazy-loading strategy see [`md files/AUDIO_LIBRARY_REPORT.md`](md%20files/AUDIO_LIBRARY_REPORT.md).
 
@@ -367,7 +374,7 @@ Blocks can have a recorded movement path that plays back in sync with the transp
 ### How to Record
 
 **Step 1 — Enter edit mode**
-Press `E`. The HUD shows `EDIT MODE` and all blocks get a dim yellow highlight.
+Press `Tab`. The HUD shows `EDIT MODE` and all blocks get a dim yellow highlight.
 
 **Step 2 — Select a block**
 Hold `Alt` and `LMB`-click the block you want to record. The block highlights orange and recording starts immediately. A red **● REC** indicator appears in the top-right corner of the viewport, and you will hear the block's sound playing as a preview.
@@ -386,7 +393,7 @@ Release the mouse button. The **● REC** indicator disappears and a confirmatio
 - **Cancel** — movement is discarded, block resets.
 
 **Step 6 — Play it back**
-Press `E` to exit edit mode, then press **Play**. The block will travel through its recorded positions in sync with the transport clock.
+Press `Tab` to exit edit mode, then press **Play**. The block will travel through its recorded positions in sync with the transport clock.
 
 ### Authoring keyframes by hand (alternative to Alt-drag)
 
@@ -484,6 +491,104 @@ the result in the Info panel:
   Quick visual for attack / decay shape.
 
 Analysis is cached per selection; opening a different block re-analyzes.
+
+---
+
+## Camera Path (listener keyframes)
+
+A per-scene **camera path** lets you choreograph the listener — the same
+way the [position-keyframe popup](#block-movement-recording) choreographs
+blocks.  As soon as the path contains at least one keyframe the camera
+**auto-follows** during playback (and during export); to "let go" of the
+camera again, clear the path from the **Path…** editor.
+
+### Two keyframe modes
+
+| Mode | Meaning |
+|------|---------|
+| **Hold** | Freeze the pose until the next keyframe time, then snap.  Use for static "shots" — e.g. front of orchestra for 10 s, then a teleport behind the cellos.  A Hold keyframe also has a **HOLD (s)** value that defines how long it occupies the timeline; the next "+ Hold @ cam now" insert and the next recording session land at `time + holdDuration`. |
+| **Lerp** | Smoothly interpolate position + yaw + pitch toward the next keyframe.  Live R-recording emits a stream of `Lerp` keyframes at the chosen **Capture every** rate (default 1 s). |
+
+Position is straight linear, yaw is **shortest-arc** lerped (no
+unwinding through a full circle), pitch is linear.  Before the first
+keyframe and after the last, the path holds at the endpoint pose — so
+you don't need to clamp times yourself.
+
+### Authoring
+
+Open **Path…** in the toolbar (or just click **Help** for a one-shot
+reminder).  The popup shows every keyframe as a row with editable Time /
+X / Y / Z / Yaw° / Pitch° fields plus a `Hold ▾ Lerp` combo and a
+remove (×) button.
+
+Two ways to author:
+
+* **+ Hold @ cam now** — drops a `Hold` keyframe at the **next available
+  time slot** using the live camera pose.  "Next slot" = the end of the
+  last segment in the draft (`time + HOLD (s)` for Hold tails, plain
+  `time` for Lerp tails) — so consecutive Hold inserts stack neatly
+  rather than piling on top of each other at `t=0`.  If the draft is
+  empty, the first insert uses the current playhead.  The popup is the
+  source of truth while it's open, so clicks add to the local draft
+  immediately and aren't overwritten by background polling.
+* **Record (R)** — starts a live capture session.  **Works whether or
+  not the transport is playing.**  When playing, timestamps ride the
+  transport clock.  When paused, timestamps start from the current
+  playhead and advance with wall-clock time — so you can stand still in
+  the timeline and hand-author a moving shot.  Press **R** (or click
+  the button) again to stop; the captured keyframes splice into the
+  path at the start time and anything inside the recording window is
+  replaced.
+
+Apply commits the list; Cancel keeps whatever was there before.  **Clear
+all** and the per-row × button operate on the local draft and only flow
+to the scene when you press Apply.
+
+### Live playback & scrub preview
+
+The camera auto-follows the path whenever at least one keyframe exists,
+**both during playback and while paused** — so dragging the timeline
+(or typing a time into the transport field) gives you an instant
+camera preview from the path, the same way the per-block keyframe
+popup previews block positions while scrubbing.  Recording always
+overrides following (so you can fly the camera while capturing without
+fighting the active path).
+
+To override the path **without clearing it**, toggle the toolbar
+**Free Cam** pill ON — the path data is preserved (and still used for
+the audio listener pose during export) but the live viewport camera
+goes back under your control.
+
+### Export
+
+When a camera path exists, the offline bouncer ignores the static
+anchor / camera pose and animates the listener through the path.  The
+**Export Audio** dialog shows the active mode:
+
+* `CAMERA PATH active (N keyframes, T0 → T1 s).` (green) — exporter
+  will animate the listener.
+* `ANCHORED at (…)` (blue) — exporter freezes at the anchor.
+* `Anchor not set. Export will use the current camera pose…` (yellow) —
+  exporter uses whatever the camera is doing right now.
+
+The path is saved with the scene in `.sime` v11 (older files load
+cleanly: v10 files come back without `holdDurationSec`, which defaults
+to 0; pre-v10 files load with an empty path entirely — the binary
+trailer is identified by a `CPTH` magic so older readers ignore it
+cleanly).
+
+### Where it lives in the code
+
+| Concern | File |
+|---------|------|
+| Data + interpolation | `Source/CameraPath.h` |
+| Live following + R hotkey + GL-thread recording | `Source/ViewPortComponent.cpp` |
+| Editor popup | `Source/CameraPathPopup.{h,cpp}` |
+| Offline bake | `Source/SceneAudioExporter.cpp` (`resolveListener` + per-chunk re-mix) |
+| Persistence v10 | `Source/SceneFile.cpp` |
+
+Detailed engineering notes:
+[`md files/CAMERA_PATH_REPORT.md`](md%20files/CAMERA_PATH_REPORT.md).
 
 ---
 
@@ -833,6 +938,107 @@ for the full bug log + root causes.
   column (`btnX = getWidth() - margin - btnW`), the artificial 40-px
   floor is gone, and the control uses flat colours + `ConnectedOnLeft`
   so it reads as one row with the loop-length field.
+
+### Added after the 2026-06-01 session (camera path + help popup)
+
+* **Camera (listener) path** — a per-scene sequence of `CameraKeyframe`s
+  that drives the camera and the audio listener during playback **and**
+  export.  Two modes per keyframe, modelled after the user's spec:
+  * **Hold** — freeze the pose until the next keyframe (instant cut).
+  * **Lerp** — smoothly interpolate position + yaw + pitch to the next
+    keyframe.  Live R-recording emits a stream of Lerp keyframes at ~20 Hz.
+  Authored from the new **Path…** popup (toolbar) — manual rows for time /
+  pos / yaw / pitch / mode + **Hold @ cam now** and **Record (R)** buttons.
+  The camera auto-follows whenever the path is non-empty; recording
+  always overrides following.  See
+  [`md files/CAMERA_PATH_REPORT.md`](md%20files/CAMERA_PATH_REPORT.md).
+
+* **Export honors the path** — when a camera path is set, the offline
+  bouncer samples it per chunk and feeds chunk-constant listener gains to
+  every active voice, so a sustained note slides through pan / level as
+  the listener moves.  Otherwise it falls back to the anchor (if set) or
+  the current camera pose.  The export dialog shows which of the three
+  modes will be baked.
+
+* **Help popup** — toolbar **Help** button opens a single-panel cheat
+  sheet listing every key + mouse action, kept in sync with the actual
+  bindings in `ViewPortComponent::keyPressed` and
+  `MainComponent::keyPressed`.
+
+* **Camera reset moved to `Home`** — frees `R` for camera-path recording.
+
+### Follow-ups on the 2026-06-01 session (UX feedback round)
+
+* **R works anywhere in the window** — the shortcut is now also handled by
+  `MainComponent::keyPressed`, so a focused popup or sidebar control no
+  longer eats it.  Pressing **R** toggles camera-path recording whether
+  the viewport, the toolbar, or the path editor has focus.
+* **R works whether or not the transport is playing** — when playing,
+  keyframe times ride the transport clock; when paused, they start from
+  the current playhead and advance with wall-clock time, so you can
+  stand still in the timeline and hand-author a moving shot.
+* **Path editor: Clear / × actually clear** — the popup is now the
+  source of truth while it's open.  Background polling only re-fetches
+  the path when a recording session ends; manual edits, deletes, and
+  Clear All persist until you press Apply (or close to discard).
+* **Path On toggle removed** — the camera auto-follows whenever a path
+  exists, recording always overrides following.  One less control, one
+  fewer mode for the user to keep track of.
+* **Layers menu** — Floor / YZ Wall / XY Wall / Move arrows moved into
+  a single **Layers ▾** dropdown to declutter the toolbar (which had
+  grown to 11 buttons + a slider).
+* **Help popup title fix** — replaced the em-dash that was rendering as
+  garbled bytes (`â…`) with a plain hyphen.
+* **Type-to-seek time field** — the transport-bar time readout is now a
+  text input.  Click it and type `10` or `1:23` (or `1:02:30`), press
+  Enter to jump.  Esc cancels.  Drag-scrubbing the timeline still works
+  unchanged.
+
+### Follow-ups round 2 (camera scheduling round)
+
+* **Hold keyframes carry a duration** — `CameraKeyframe::holdDurationSec`
+  defines how long a static pose "owns" the timeline.  `+ Hold @ cam now`
+  now lands at `effectiveEndTime(draft)` (last keyframe time, plus its
+  hold duration if it's a Hold tail), so successive inserts stack instead
+  of piling at `t=0`.
+* **HOLD (s) column** in the camera-path popup — editable for Hold rows,
+  greyed out and read-only for Lerp rows.  Default is 2 s for a freshly
+  inserted `+ Hold @ cam now`.
+* **Capture every: dropdown** in the camera-path popup — picks the
+  R-recording sample rate.  Options: 0.1 / 0.25 / 0.5 / 1 / 2 / 5 s.
+  Default 1 s, so a live take produces a clean, manageable list (the
+  old 20 Hz hardcoded value generated ~600 keyframes for a 30-second
+  flight, which the user fairly called "way too specific").
+* **Live camera preview while scrubbing** — the path now drives the
+  camera whenever it has at least one keyframe, regardless of whether
+  the transport is playing.  Drag the timeline (or type a time) and
+  the viewport jumps to the path's pose at that time, mirroring how the
+  block movement popup previews block positions.
+* **Free Cam toolbar toggle** — when ON, the user keeps manual camera
+  control even with a path loaded.  Path data is preserved and still
+  used for the audio listener during export.
+* **Block movement: Snap times dropdown** — the per-block keyframe
+  editor (sidebar → Edit movement…) gets a `Snap times: [Off / 0.5 / 1
+  / 2 / 5 s]` selector that rounds every row's time to the chosen grid.
+  Default Off so existing scenes look unchanged; pick `1 s` for a
+  "show every second" view that's much easier to skim and edit.
+* **`.sime` v11** — `CPTH` keyframes now persist `holdDurationSec`.
+  v10 files load with all hold durations defaulting to 0 (= hold until
+  the next keyframe, the pre-v11 behaviour).
+
+### Added after the 2026-06-01 session (spatial perception overhaul)
+
+* **Camera-relative spatial mix** — pan, distance gain, and front/back
+  attenuation are computed from the **listener** (camera position +
+  forward/right), not the world origin.  Movement events refresh the same
+  `applySpatialPosition` path.  **1 grid unit = 1 metre.**
+* **Default sound on placement** — new blocks call
+  `SoundLibrary::defaultSoundForBlockType` when the library is loaded.
+* **Toolbar Anchor** — freezes listener pose; camera restores when toggled off.
+* **Toolbar Spatial** slider — scales distance falloff (`refDist ≈ 3 m / sensitivity`).
+* **Sidebar SPATIAL** — live listener distance + approximate dB for the
+  selected block; **Distance…** picks block B in the viewport and shows
+  separation (Δx, Δy, Δz, metres) plus level at B from the listener.
 
 ### Added after the 2026-05-27 session
 

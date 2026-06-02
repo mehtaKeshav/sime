@@ -986,6 +986,61 @@ void ViewPortComponent::renderOpenGL()
 
                 if (hitSerial >= 0)
                 {
+                    bool skipSelect = false;
+
+                    if (distancePickActive_.load())
+                    {
+                        skipSelect = true;
+                        const int anchor = distancePickAnchorSerial_.load();
+                        if (anchor >= 0 && hitSerial != anchor)
+                        {
+                            Vec3f aPos {}, bPos {};
+                            bool haveA = false, haveB = false;
+                            for (const auto& b : blockList)
+                            {
+                                if (b.serial == anchor)
+                                {
+                                    aPos  = Vec3f((float) b.pos.x,
+                                                  (float) b.pos.y,
+                                                  (float) b.pos.z);
+                                    haveA = true;
+                                }
+                                if (b.serial == hitSerial)
+                                {
+                                    bPos  = Vec3f((float) b.pos.x,
+                                                  (float) b.pos.y,
+                                                  (float) b.pos.z);
+                                    haveB = true;
+                                }
+                            }
+
+                            if (haveA && haveB)
+                            {
+                                const float dx = bPos.x - aPos.x;
+                                const float dy = bPos.y - aPos.y;
+                                const float dz = bPos.z - aPos.z;
+                                const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                                const auto atB = audioEngine.measureSourceAt(
+                                    bPos.x, bPos.y, bPos.z);
+
+                                distancePickActive_.store(false);
+
+                                const int aSer = anchor;
+                                const int bSer = hitSerial;
+                                juce::MessageManager::callAsync(
+                                    [this, aSer, bSer, dx, dy, dz, dist, atB]()
+                                    {
+                                        if (onDistanceMeasured)
+                                            onDistanceMeasured(aSer, bSer,
+                                                               dx, dy, dz,
+                                                               dist, atB.approxDb);
+                                    });
+                            }
+                        }
+                    }
+
+                    if (!skipSelect)
+                    {
                     selectedSerial          = hitSerial;
                     highlightedBlockSerial_ = hitSerial;
 
@@ -1008,6 +1063,7 @@ void ViewPortComponent::renderOpenGL()
                         if (onBlockSelected)
                             onBlockSelected(ser);
                     });
+                    }   // !skipSelect
                 }
                 else if (!ec.shift)
                 {
@@ -1261,7 +1317,15 @@ void ViewPortComponent::renderOpenGL()
             newBlock.serial    = nextSerial++;
             newBlock.blockType = placedType;
             newBlock.pos       = placePos;
-            newBlock.soundId   = blockTypeDefaultSoundId(placedType);
+            {
+                int sid = -1;
+                if (libraryLoaded_)
+                    sid = library_.defaultSoundForBlockType(placedType, audioEngine);
+                else
+                    sid = blockTypeDefaultSoundId(placedType);
+                if (sid >= 0)
+                    newBlock.soundId = sid;
+            }
             newBlock.colour = newBlock.getBlockColor(newBlock.blockType, newBlock.soundId);
 
             // BUG-S1 fix: stagger start time so new blocks don't all pile up at t=0.
@@ -1479,11 +1543,196 @@ void ViewPortComponent::renderOpenGL()
     const Mat4  vp     = proj * view;
     Vec3f lightDir     = Vec3f(0.55f, 1.f, 0.4f).normalized();
 
-    // Feed the listener position to the audio engine each frame so the
-    // Doppler effect tracks camera movement.  Cheap atomic stores.
+    // ── Drain pending camera-path ops (message thread → GL thread) ──────────
     {
-        const Vec3f camPos = camera.getPosition();
-        audioEngine.setListenerPosition(camPos.x, camPos.y, camPos.z);
+        std::vector<PendingPathOp> ops;
+        {
+            juce::ScopedLock lk(pendingPathOpMutex_);
+            ops.swap(pendingPathOps_);
+        }
+        for (auto& op : ops)
+        {
+            switch (op.type)
+            {
+                case PendingPathOp::Replace:
+                {
+                    juce::ScopedLock lk(cameraPathMutex_);
+                    cameraPath_ = std::move(op.payload);
+                    CameraPathUtil::sortByTime(cameraPath_);
+                    cameraPathHasAny_.store(!cameraPath_.empty());
+                    break;
+                }
+                case PendingPathOp::Clear:
+                {
+                    juce::ScopedLock lk(cameraPathMutex_);
+                    cameraPath_.clear();
+                    cameraPathHasAny_.store(false);
+                    break;
+                }
+                case PendingPathOp::AddHold:
+                {
+                    CameraKeyframe kf;
+                    kf.timeSec  = op.timeSec;
+                    kf.pos      = camera.getPosition();
+                    kf.yawRad   = camera.getYaw();
+                    kf.pitchRad = camera.getPitch();
+                    kf.mode     = CameraKeyframe::Hold;
+                    juce::ScopedLock lk(cameraPathMutex_);
+                    cameraPath_.push_back(kf);
+                    CameraPathUtil::sortByTime(cameraPath_);
+                    cameraPathHasAny_.store(true);
+                    break;
+                }
+                case PendingPathOp::StartRecord:
+                {
+                    recordingActive_         = true;
+                    recordingStartSec_       = transportClock.currentTimeSec();
+                    recordingStartWallSec_   = juce::Time::getMillisecondCounterHiRes() * 0.001;
+                    // Initialise so the FIRST tick captures immediately.
+                    recordingLastCaptureWall_= recordingStartWallSec_
+                                              - cameraRecordIntervalSec_.load();
+                    recordingBuffer_.clear();
+                    cameraPathRecording_.store(true);
+                    break;
+                }
+                case PendingPathOp::StopRecord:
+                {
+                    if (recordingActive_)
+                    {
+                        recordingActive_ = false;
+                        cameraPathRecording_.store(false);
+
+                        if (recordingBuffer_.size() >= 1)
+                        {
+                            const double t0 = recordingStartSec_;
+                            const double t1 = recordingBuffer_.back().timeSec;
+                            juce::ScopedLock lk(cameraPathMutex_);
+                            // Remove any existing keyframes inside [t0, t1]
+                            cameraPath_.erase(
+                                std::remove_if(cameraPath_.begin(), cameraPath_.end(),
+                                    [t0, t1](const CameraKeyframe& k)
+                                    { return k.timeSec >= t0 && k.timeSec <= t1; }),
+                                cameraPath_.end());
+                            cameraPath_.insert(cameraPath_.end(),
+                                               recordingBuffer_.begin(),
+                                               recordingBuffer_.end());
+                            CameraPathUtil::sortByTime(cameraPath_);
+                            cameraPathHasAny_.store(!cameraPath_.empty());
+                        }
+                        recordingBuffer_.clear();
+                    }
+                    break;
+                }
+                case PendingPathOp::FollowSet:
+                {
+                    cameraPathFollowEnabled_.store(op.enable);
+                    break;
+                }
+                default: break;
+            }
+        }
+    }
+
+    // ── Capture recording samples (works whether playing or not) ────────────
+    if (recordingActive_)
+    {
+        const double wallNow      = juce::Time::getMillisecondCounterHiRes() * 0.001;
+        const double captureEvery = cameraRecordIntervalSec_.load();
+        if (wallNow >= recordingLastCaptureWall_ + captureEvery)
+        {
+            // Effective scene time:
+            //   * Playing  → ride the transport clock (handles playback rate)
+            //   * Paused   → base playhead + wall-clock elapsed since record start
+            // The "paused" branch is what lets the user stand still in time and
+            // hand-author a moving shot.
+            const double effTime = transportClock.isPlaying()
+                ? transportClock.currentTimeSec()
+                : (recordingStartSec_ + (wallNow - recordingStartWallSec_));
+
+            CameraKeyframe kf;
+            kf.timeSec  = effTime;
+            kf.pos      = camera.getPosition();
+            kf.yawRad   = camera.getYaw();
+            kf.pitchRad = camera.getPitch();
+            kf.mode     = CameraKeyframe::Lerp;
+            recordingBuffer_.push_back(kf);
+            recordingLastCaptureWall_ = wallNow;
+        }
+    }
+
+    // ── Drive camera from path (live preview during play AND scrub) ─────────
+    // The path always drives the camera when present, EXCEPT when:
+    //   * the user has toggled Free Cam (toolbar) — they want manual control
+    //   * a recording session is active — recording always overrides
+    // Running the sampler while paused too means dragging the timeline (or
+    // typing a time) gives the user an instant camera preview, matching how
+    // the per-block keyframe popup previews block positions while scrubbing.
+    if (cameraPathFollowEnabled_.load()
+        && cameraPathHasAny_.load()
+        && !freeCameraOverride_.load()
+        && !recordingActive_)
+    {
+        CameraPose def;
+        def.pos      = camera.getPosition();
+        def.yawRad   = camera.getYaw();
+        def.pitchRad = camera.getPitch();
+
+        std::vector<CameraKeyframe> snap;
+        {
+            juce::ScopedLock lk(cameraPathMutex_);
+            snap = cameraPath_;
+        }
+        const auto p = CameraPathUtil::sample(snap,
+                                              transportClock.currentTimeSec(),
+                                              def);
+        camera.setPosition(p.pos);
+        camera.setYawPitch(p.yawRad, p.pitchRad);
+    }
+
+    // Pending audio-anchor toggle (message thread → GL thread).
+    if (pendingAnchorOp_.exchange(false))
+    {
+        const bool wantOn = pendingAnchorEnable_.load();
+        if (wantOn && !audioAnchorActive_)
+        {
+            savedCameraPos_  = camera.getPosition();
+            savedCameraLookAt_ = savedCameraPos_ + camera.getForward();
+            audioAnchorPos_     = savedCameraPos_;
+            audioAnchorForward_ = camera.getForward();
+            audioAnchorRight_   = camera.getRight();
+            audioAnchorActive_  = true;
+        }
+        else if (!wantOn && audioAnchorActive_)
+        {
+            audioAnchorActive_ = false;
+            camera.setPosition(savedCameraPos_);
+            camera.lookAtTarget(savedCameraLookAt_);
+        }
+    }
+
+    // Feed listener pose to the audio engine each frame (camera or frozen
+    // anchor).  Pan / distance / front-back all use this, not the origin.
+    {
+        Vec3f listenPos;
+        Vec3f fwd;
+        Vec3f rgt;
+
+        if (audioAnchorActive_)
+        {
+            listenPos = audioAnchorPos_;
+            fwd       = audioAnchorForward_;
+            rgt       = audioAnchorRight_;
+        }
+        else
+        {
+            listenPos = camera.getPosition();
+            fwd       = camera.getForward();
+            rgt       = camera.getRight();
+        }
+
+        audioEngine.setListenerPosition(listenPos.x, listenPos.y, listenPos.z);
+        audioEngine.setListenerOrientation(fwd.x, fwd.y, fwd.z,
+                                           rgt.x, rgt.y, rgt.z);
     }
 
     if (showFloorPlane_.load())  renderer.renderPlaneXZ(vp);
@@ -1555,7 +1804,9 @@ void ViewPortComponent::renderOpenGL()
             }
         }
 
-        // Green: selected block (viewport or timeline click)
+        // Orange: selected block (viewport or timeline click).  Green is now
+        // reserved for the "firing right now" pulse so the two states don't
+        // collide visually.
         if (highlightedBlockSerial_ >= 0)
         {
             for (const auto& b : blockList)
@@ -1564,8 +1815,8 @@ void ViewPortComponent::renderOpenGL()
                 if (b.serial == highlightedBlockSerial_)
                 {
                     const Vec3f selCol = hoveringBlock && b.serial == hoveredBlockSerial_
-                        ? Vec3f{ 0.35f, 1.f, 0.45f }
-                        : Vec3f{ 0.15f, 0.95f, 0.25f };
+                        ? Vec3f{ 1.0f,  0.65f, 0.20f }
+                        : Vec3f{ 1.0f,  0.50f, 0.10f };
                     renderer.renderHighlight(vp, b.pos, selCol);
                     break;
                 }
@@ -2929,10 +3180,18 @@ bool ViewPortComponent::keyPressed(const juce::KeyPress& k)
         return true;
     }
 
-    // R – reset camera
-    if (k.getKeyCode() == 'r' || k.getKeyCode() == 'R')
+    // Home – reset camera position (was 'R' before camera-path recording took it)
+    if (k.getKeyCode() == juce::KeyPress::homeKey)
     {
         camera.setPosition({ 8.f, 8.f, 8.f });
+        return true;
+    }
+
+    // R – toggle camera-path recording (only while transport is playing).
+    //     Same toggle semantics as the popup's "Record" button.
+    if (k.getKeyCode() == 'r' || k.getKeyCode() == 'R')
+    {
+        toggleCameraPathRecording();
         return true;
     }
 
@@ -3151,14 +3410,58 @@ bool ViewPortComponent::exportSceneAudioToFile(const juce::File& outputFile,
 {
     const auto blocks = getBlockListCopy();
     const double sr   = audioEngine.getOutputSampleRate();
+    const auto info   = getExportListenerInfo();
+
+    SceneAudioExporter::ListenerPose pose;
+    pose.anchored    = info.anchored;
+    pose.posX        = info.pos.x;
+    pose.posY        = info.pos.y;
+    pose.posZ        = info.pos.z;
+    pose.fwdX        = info.forward.x;
+    pose.fwdY        = info.forward.y;
+    pose.fwdZ        = info.forward.z;
+    pose.rightX      = info.right.x;
+    pose.rightY      = info.right.y;
+    pose.rightZ      = info.right.z;
+    pose.sensitivity = info.sensitivity;
+
+    // If a camera path exists, always bake it into the export (regardless of
+    // the live "Path On" toggle).  This matches user intuition: the bounce
+    // is the rendered scene, not the current live preview state.
+    pose.cameraPath = getCameraPathCopy();
+    pose.pathFollow = !pose.cameraPath.empty();
 
     return SceneAudioExporter::bounceToFile(
         blocks,
         audioEngine.getSampleLibrary(),
         sr,
+        pose,
         outputFile,
         format,
         errorOut);
+}
+
+ViewPortComponent::ExportListenerInfo ViewPortComponent::getExportListenerInfo() const
+{
+    ExportListenerInfo info;
+    info.sensitivity = audioEngine.getSpatialSensitivity();
+
+    if (audioAnchorActive_)
+    {
+        info.anchored = true;
+        info.pos      = audioAnchorPos_;
+        info.forward  = audioAnchorForward_;
+        info.right    = audioAnchorRight_;
+    }
+    else
+    {
+        info.anchored = false;
+        info.pos      = camera.getPosition();
+        info.forward  = camera.getForward();
+        info.right    = camera.getRight();
+    }
+
+    return info;
 }
 
 void ViewPortComponent::seekTransportClock(double newTimeSec)
@@ -3263,4 +3566,71 @@ AudioAnalysisResult ViewPortComponent::analyzeBlockAudio(const BlockEntry& block
 
     constexpr double kAnalysisRate = 44100.0;
     return AudioAnalysis::analyze(it->second, kAnalysisRate);
+}
+
+void ViewPortComponent::setAudioAnchorEnabled(bool enabled)
+{
+    pendingAnchorEnable_.store(enabled);
+    pendingAnchorOp_.store(true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Camera-path API (message thread)
+// ─────────────────────────────────────────────────────────────────────────────
+
+std::vector<CameraKeyframe> ViewPortComponent::getCameraPathCopy() const
+{
+    juce::ScopedLock lk(cameraPathMutex_);
+    return cameraPath_;
+}
+
+void ViewPortComponent::applyCameraPath(std::vector<CameraKeyframe> path)
+{
+    PendingPathOp op;
+    op.type    = PendingPathOp::Replace;
+    op.payload = std::move(path);
+    juce::ScopedLock lk(pendingPathOpMutex_);
+    pendingPathOps_.push_back(std::move(op));
+}
+
+void ViewPortComponent::clearCameraPath()
+{
+    PendingPathOp op;
+    op.type = PendingPathOp::Clear;
+    juce::ScopedLock lk(pendingPathOpMutex_);
+    pendingPathOps_.push_back(std::move(op));
+}
+
+void ViewPortComponent::setCameraPathFollowEnabled(bool enabled)
+{
+    PendingPathOp op;
+    op.type   = PendingPathOp::FollowSet;
+    op.enable = enabled;
+    juce::ScopedLock lk(pendingPathOpMutex_);
+    pendingPathOps_.push_back(std::move(op));
+}
+
+void ViewPortComponent::toggleCameraPathRecording()
+{
+    PendingPathOp op;
+    op.type = cameraPathRecording_.load()
+             ? PendingPathOp::StopRecord
+             : PendingPathOp::StartRecord;
+    juce::ScopedLock lk(pendingPathOpMutex_);
+    pendingPathOps_.push_back(std::move(op));
+}
+
+void ViewPortComponent::addCameraHoldFromCurrent(double atTimeSec)
+{
+    PendingPathOp op;
+    op.type    = PendingPathOp::AddHold;
+    op.timeSec = atTimeSec;
+    juce::ScopedLock lk(pendingPathOpMutex_);
+    pendingPathOps_.push_back(std::move(op));
+}
+
+void ViewPortComponent::beginDistancePick(int anchorSerial)
+{
+    distancePickAnchorSerial_.store(anchorSerial);
+    distancePickActive_.store(anchorSerial >= 0);
 }
