@@ -433,6 +433,10 @@ MainComponent::MainComponent()
         view.beginDistancePick(serial);
         sidebar.setDistancePickActive(true);
     };
+    sidebar.onCancelDistancePick = [this]
+    {
+        view.cancelDistancePick();
+    };
 
     // ── Wire edit popup ───────────────────────────────────────────────────────
     view.onRequestBlockEdit = [this](int serial, BlockType type,

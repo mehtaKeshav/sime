@@ -270,6 +270,7 @@ SidebarComponent::SidebarComponent()
     {
         blockPanelOpen = true;
         infoPanelOpen = false;
+        resetSpatialUi();
         repaint();
         resized();
     };
@@ -355,6 +356,7 @@ void SidebarComponent::resized()
         hideToggle_.setBounds(0, 0, 0, 0);
         muteScheduleBtn_.setBounds(0, 0, 0, 0);
         matchSoundDurBtn_.setBounds(0, 0, 0, 0);
+        distanceBtn_.setBounds(0, 0, 0, 0);
         applyButton.setBounds(0, 0, 0, 0);
         resetDefaultsBtn_.setBounds(0, 0, 0, 0);
         return;
@@ -387,6 +389,7 @@ void SidebarComponent::resized()
     hideToggle_.setBounds(0, 0, 0, 0);
     muteScheduleBtn_.setBounds(0, 0, 0, 0);
     matchSoundDurBtn_.setBounds(0, 0, 0, 0);
+    distanceBtn_.setBounds(0, 0, 0, 0);
     applyButton.setBounds(0, 0, 0, 0);
     resetDefaultsBtn_.setBounds(0, 0, 0, 0);
 
@@ -1079,6 +1082,18 @@ void SidebarComponent::setDistancePickActive(bool picking)
     repaint();
 }
 
+void SidebarComponent::resetSpatialUi()
+{
+    spatialListenerLine_.clear();
+    spatialDistanceLine_.clear();
+    distancePickActive_ = false;
+    distanceBtn_.setButtonText("Distance...");
+    distanceBtn_.setBounds(0, 0, 0, 0);
+
+    if (onCancelDistancePick)
+        onCancelDistancePick();
+}
+
 void SidebarComponent::mouseWheelMove(const juce::MouseEvent& e,
                                       const juce::MouseWheelDetails& wheel)
 {
@@ -1102,6 +1117,8 @@ void SidebarComponent::mouseWheelMove(const juce::MouseEvent& e,
 
 void SidebarComponent::clearSelectedBlock()
 {
+    resetSpatialUi();
+
     selectedBlock_.reset();
     originalBlock_.reset();
     selectedDisplayName_.clear();

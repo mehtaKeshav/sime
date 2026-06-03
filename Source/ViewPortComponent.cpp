@@ -226,12 +226,15 @@ void ViewPortComponent::renderOpenGL()
         hoveredBlockSerial_     = -1;
         recordingBlockSerial    = -1;
         renderer.meshDirty      = true;
+        distancePickActive_.store(false);
+        distancePickAnchorSerial_.store(-1);
 
         juce::MessageManager::callAsync([this]()
         {
             if (sidebar != nullptr)
             {
                 sidebar->setBlocks({});
+                sidebar->resetSpatialUi();
                 sidebar->clearSelectedBlock();
             }
             if (onBlockListChanged)
@@ -1282,21 +1285,13 @@ void ViewPortComponent::renderOpenGL()
             }
             else
             {
-                // Ground plane fallback
+                // Ground-plane placement only.  Mid-air columns require Shift
+                // (shift-plane mode) — do not project into empty sky.
                 Vec3i gp = Raycaster::groundPlaneHit(origin, rayDir);
                 if (gp != Vec3i{})
                 {
                     placePos = gp;
                     valid    = (placePos.y >= 0);
-                }
-                else
-                {
-                    // Ray pointing up or horizontal: place at fixed distance,
-                    // clamped to y >= 0 so it lands on or above the grid floor.
-                    Vec3f pt = origin + rayDir * 8.0f;
-                    placePos = pt.floor();
-                    if (placePos.y < 0) placePos.y = 0;
-                    valid = true;
                 }
             }
         }
@@ -2072,11 +2067,6 @@ void ViewPortComponent::renderOpenGL()
             Vec3i gp = Raycaster::groundPlaneHit(camera.getPosition(), currentRayDir);
             if (gp != Vec3i{})
                 curPos = gp;
-            else
-            {
-                Vec3f pt = camera.getPosition() + currentRayDir * 8.0f;
-                curPos = pt.floor();
-            }
         }
 
         juce::ScopedLock lock(hud.lock);

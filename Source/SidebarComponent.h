@@ -65,8 +65,15 @@ public:
     void setBlockDistanceReadout(const juce::String& line);
     void setDistancePickActive(bool picking);
 
+    /// Clears A->B distance readout, resets the Distance button, and cancels
+    /// an in-progress pick.  Call when leaving the Info tab or clearing the
+    /// scene so the button does not float over the Blocks list.
+    void resetSpatialUi();
+
     /// User clicked Distance — pick block B in the viewport (A = current block).
     std::function<void(int anchorSerial)> onRequestDistancePick;
+    /// Fired from resetSpatialUi() so the host can cancel the viewport pick.
+    std::function<void()> onCancelDistancePick;
 
     /// Callback fired when the user clicks Apply.  Carries every editable
     /// field on the Info panel.  `playbackMode` is a uint8_t so the header
